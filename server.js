@@ -195,3 +195,21 @@ app.post("/jira-webhook", async (req, res) => {
 app.listen(PORT, () => {
   console.log(`🌍 Server running on port ${PORT}`);
 });
+
+app.get("/debug-spaces", async (req, res) => {
+  try {
+    const response = await axios.get(
+      `${BASE_URL}/wiki/rest/api/space`,
+      {
+        headers: { Authorization: `Basic ${auth}` }
+      }
+    );
+
+    console.log("ALL SPACES:", response.data.results);
+
+    res.json(response.data.results);
+  } catch (err) {
+    console.error(err.response?.data || err.message);
+    res.status(500).send("Error fetching spaces");
+  }
+});
