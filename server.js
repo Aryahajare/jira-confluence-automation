@@ -27,28 +27,50 @@ const confluenceV2 = axios.create({
 let resolvedSpaceId = null;
 
 /**
- * Resolve SPACE_KEY → numeric spaceId using the v2 /spaces endpoint.
- * The v2 API requires spaceId (number), NOT spaceKey (string).
+ * Resolve SPACE_KEY → numeric spaceId.
+ *
+ * WHY v1 here: The v2 /spaces endpoint has NO key-based filter — it only
+ * accepts numeric IDs. The v1 /wiki/rest/api/space/{key} endpoint is the
+ * only way to look up a space by its key string and is still fully supported
+ * for this use-case. We use v1 ONLY for this one lookup, then stay on v2.
  */
 async function getSpaceId() {
   if (resolvedSpaceId) return resolvedSpaceId;
 
-  console.log(`🔍 Resolving spaceId for key: ${SPACE_KEY}`);
+  console.log(`🔍 Resolving spaceId for key: "${SPACE_KEY}" via v1 space lookup...`);
 
-  const res = await confluenceV2.get("/spaces", {
-    params: { keys: SPACE_KEY, limit: 1 },
-  });
-
-  const results = res.data?.results;
-  if (!results || results.length === 0) {
-    throw new Error(
-      `❌ Space with key "${SPACE_KEY}" not found. ` +
-      `Check your SPACE_KEY env var and that the API token has access to that space.`
+  let res;
+  try {
+    res = await axios.get(
+      `${BASE_URL}/wiki/rest/api/space/${encodeURIComponent(SPACE_KEY)}`,
+      {
+        headers: {
+          Authorization: authHeader,
+          Accept: "application/json",
+        },
+      }
     );
+  } catch (err) {
+    const status = err.response?.status;
+    const detail = err.response?.data?.message || err.message;
+
+    if (status === 401 || status === 403) {
+      throw new Error(
+        `🔐 Auth failed resolving space "${SPACE_KEY}" (HTTP ${status}). ` +
+        `Check that EMAIL and API_TOKEN are correct and the token has Confluence access.`
+      );
+    }
+    if (status === 404) {
+      throw new Error(
+        `🔍 Space key "${SPACE_KEY}" does not exist or is not visible to this account (HTTP 404). ` +
+        `Verify the key in your Confluence URL: /wiki/spaces/${SPACE_KEY}/overview`
+      );
+    }
+    throw new Error(`Space lookup failed (HTTP ${status}): ${detail}`);
   }
 
-  resolvedSpaceId = results[0].id; // numeric string, e.g. "12345678"
-  console.log(`✅ Resolved spaceId: ${resolvedSpaceId}`);
+  resolvedSpaceId = String(res.data.id); // numeric, e.g. "786433"
+  console.log(`✅ Resolved spaceId: ${resolvedSpaceId} (key: ${SPACE_KEY})`);
   return resolvedSpaceId;
 }
 
