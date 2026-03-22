@@ -88,7 +88,7 @@ app.post("/jira-webhook", async (req, res) => {
         {
           type: "page",
           title: pageTitle,
-          space: { key: SPACE_KEY },
+          space: { id: 425988 },
           body: {
             storage: {
               value: createTable(),
