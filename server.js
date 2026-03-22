@@ -4,14 +4,14 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-const PORT = process.env.PORT || 5000;
-
+const PORT      = process.env.PORT      || 5000;
 const EMAIL     = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL  = process.env.BASE_URL;   // e.g. https://your-org.atlassian.net
-const SPACE_KEY = process.env.SPACE_KEY;  // e.g. "CMS" or "~username"
+const SPACE_KEY = process.env.SPACE_KEY;  // e.g. "REL"  (fallback only)
+const SPACE_ID  = process.env.SPACE_ID;   // e.g. "327691" ← set this directly!
 
-// ─── Auth header ────────────────────────────────────────────────────────────
+// ─── Auth header ─────────────────────────────────────────────────────────────
 const authHeader = "Basic " + Buffer.from(`${EMAIL}:${API_TOKEN}`).toString("base64");
 
 const confluenceV2 = axios.create({
@@ -23,58 +23,50 @@ const confluenceV2 = axios.create({
   },
 });
 
-// ─── Cache spaceId so we only resolve it once per server lifetime ────────────
-let resolvedSpaceId = null;
+// ─── Space ID resolution ─────────────────────────────────────────────────────
+//
+// The Confluence v2 API requires a NUMERIC spaceId (e.g. "327691").
+// You can find this on: Confluence → Space Settings → scroll to "System key".
+//
+// ✅ Best:     set  SPACE_ID=327691  in your env — used directly, no API call.
+// ⚠️  Fallback: if only SPACE_KEY is set we try the v1 lookup, but this can
+//              return 404 for spaces created on newer Confluence Cloud tenants.
 
-/**
- * Resolve SPACE_KEY → numeric spaceId.
- *
- * WHY v1 here: The v2 /spaces endpoint has NO key-based filter — it only
- * accepts numeric IDs. The v1 /wiki/rest/api/space/{key} endpoint is the
- * only way to look up a space by its key string and is still fully supported
- * for this use-case. We use v1 ONLY for this one lookup, then stay on v2.
- */
+let _cachedSpaceId = SPACE_ID ? String(SPACE_ID) : null;
+
 async function getSpaceId() {
-  if (resolvedSpaceId) return resolvedSpaceId;
-
-  console.log(`🔍 Resolving spaceId for key: "${SPACE_KEY}" via v1 space lookup...`);
-
-  let res;
-  try {
-    res = await axios.get(
-      `${BASE_URL}/wiki/rest/api/space/${encodeURIComponent(SPACE_KEY)}`,
-      {
-        headers: {
-          Authorization: authHeader,
-          Accept: "application/json",
-        },
-      }
-    );
-  } catch (err) {
-    const status = err.response?.status;
-    const detail = err.response?.data?.message || err.message;
-
-    if (status === 401 || status === 403) {
-      throw new Error(
-        `🔐 Auth failed resolving space "${SPACE_KEY}" (HTTP ${status}). ` +
-        `Check that EMAIL and API_TOKEN are correct and the token has Confluence access.`
-      );
-    }
-    if (status === 404) {
-      throw new Error(
-        `🔍 Space key "${SPACE_KEY}" does not exist or is not visible to this account (HTTP 404). ` +
-        `Verify the key in your Confluence URL: /wiki/spaces/${SPACE_KEY}/overview`
-      );
-    }
-    throw new Error(`Space lookup failed (HTTP ${status}): ${detail}`);
+  if (_cachedSpaceId) {
+    console.log(`✅ spaceId: ${_cachedSpaceId}`);
+    return _cachedSpaceId;
   }
 
-  resolvedSpaceId = String(res.data.id); // numeric, e.g. "786433"
-  console.log(`✅ Resolved spaceId: ${resolvedSpaceId} (key: ${SPACE_KEY})`);
-  return resolvedSpaceId;
+  if (!SPACE_KEY) {
+    throw new Error(
+      "No SPACE_ID or SPACE_KEY env var set. " +
+      "Add SPACE_ID=327691 to your environment (find it under Confluence → Space Settings → System key)."
+    );
+  }
+
+  console.log(`🔍 SPACE_ID not set — falling back to v1 key lookup for "${SPACE_KEY}"...`);
+  try {
+    const res = await axios.get(
+      `${BASE_URL}/wiki/rest/api/space/${encodeURIComponent(SPACE_KEY)}`,
+      { headers: { Authorization: authHeader, Accept: "application/json" } }
+    );
+    _cachedSpaceId = String(res.data.id);
+    console.log(`✅ Resolved spaceId via key: ${_cachedSpaceId}`);
+    return _cachedSpaceId;
+  } catch (err) {
+    const status = err.response?.status;
+    const msg    = err.response?.data?.message || err.message;
+    throw new Error(
+      `v1 key lookup failed (HTTP ${status}): ${msg}. ` +
+      `→ Fix: set SPACE_ID=327691 in your env (the "System key" from Confluence Space Settings).`
+    );
+  }
 }
 
-// ─── Table template (Confluence storage format) ──────────────────────────────
+// ─── Table template ───────────────────────────────────────────────────────────
 const createTableHTML = () => `
 <table data-table-width="760" data-layout="default">
   <tbody>
@@ -87,13 +79,12 @@ const createTableHTML = () => `
       <th><p><strong>Link</strong></p></th>
     </tr>
   </tbody>
-</table>
-`.trim();
+</table>`.trim();
 
-// ─── Health check ────────────────────────────────────────────────────────────
+// ─── Health check ─────────────────────────────────────────────────────────────
 app.get("/", (req, res) => res.send("✅ Backend running"));
 
-// ─── Webhook handler ─────────────────────────────────────────────────────────
+// ─── Webhook handler ──────────────────────────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("🔥 WEBHOOK HIT");
   console.log("📦 BODY:", JSON.stringify(req.body, null, 2));
@@ -101,8 +92,8 @@ app.post("/jira-webhook", async (req, res) => {
   try {
     const data = req.body;
 
-    // ── 1. Extract release label ─────────────────────────────────────────────
-    const labels = data.labels || [];
+    // ── 1. Extract release label ──────────────────────────────────────────────
+    const labels    = data.labels || [];
     const labelList = Array.isArray(labels)
       ? labels
       : String(labels).split(",").map((l) => l.trim());
@@ -115,94 +106,75 @@ app.post("/jira-webhook", async (req, res) => {
 
     const releaseName = release.trim();
     const pageTitle   = `${releaseName} - CMS Wiki`;
-    console.log("📄 Target page title:", pageTitle);
+    console.log("📄 Target page:", pageTitle);
 
-    // ── 2. Resolve spaceId (v2 requires numeric ID, not key string) ──────────
+    // ── 2. Get numeric spaceId ────────────────────────────────────────────────
     const spaceId = await getSpaceId();
 
-    // ── 3. Search for an existing page by title + spaceId ───────────────────
-    //    v2 endpoint: GET /wiki/api/v2/pages?spaceId=...&title=...&body-format=storage
+    // ── 3. Search for existing page ───────────────────────────────────────────
     const searchRes = await confluenceV2.get("/pages", {
-      params: {
-        spaceId,
-        title: pageTitle,
-        "body-format": "storage",
-        limit: 1,
-      },
+      params: { spaceId, title: pageTitle, "body-format": "storage", limit: 1 },
     });
 
     let pageId, currentBody, currentVersion;
 
     if (searchRes.data.results.length === 0) {
-      // ── 4a. Page doesn't exist — create it ──────────────────────────────
-      console.log("🆕 Page not found — creating...");
-
+      // ── 4a. Create new page ─────────────────────────────────────────────────
+      console.log("🆕 Creating new page...");
       const createRes = await confluenceV2.post("/pages", {
-        spaceId,          // ← numeric ID (required by v2)
+        spaceId,
         status: "current",
-        title: pageTitle,
-        body: {
-          representation: "storage",
-          value: createTableHTML(),
-        },
+        title:  pageTitle,
+        body:   { representation: "storage", value: createTableHTML() },
       });
-
       pageId         = createRes.data.id;
       currentBody    = createRes.data.body.storage.value;
       currentVersion = createRes.data.version.number;
-      console.log(`✅ Page created — id: ${pageId}, version: ${currentVersion}`);
+      console.log(`✅ Created — id: ${pageId}, version: ${currentVersion}`);
 
     } else {
-      // ── 4b. Page exists — fetch full body + version ──────────────────────
-      console.log("📄 Page found — fetching full content...");
-
+      // ── 4b. Fetch existing page body ────────────────────────────────────────
+      console.log("📄 Page exists — fetching...");
       pageId = searchRes.data.results[0].id;
-
-      // v2 expand for body uses body-format=storage, NOT expand=body.storage
       const fullPageRes = await confluenceV2.get(`/pages/${pageId}`, {
         params: { "body-format": "storage" },
       });
-
       currentBody    = fullPageRes.data.body.storage.value;
       currentVersion = fullPageRes.data.version.number;
-      console.log(`📝 Page fetched — version: ${currentVersion}`);
+      console.log(`📝 Fetched — version: ${currentVersion}`);
     }
 
-    // ── 5. Build and inject the new table row ────────────────────────────────
-    const safeText = (val) =>
-      String(val || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    // ── 5. Inject new table row ───────────────────────────────────────────────
+    const safe = (v) =>
+      String(v || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
-    const newRow = `
-<tr>
-  <td><p>${safeText(data.ticketId)}</p></td>
-  <td><p>${safeText(data.summary)}</p></td>
-  <td><p>${safeText(data.assignee) || "Unassigned"}</p></td>
-  <td><p>${safeText(data.reporter)}</p></td>
-  <td><p>${safeText(data.stageOnly) || "false"}</p></td>
-  <td><p><a href="${data.link || "#"}">View</a></p></td>
-</tr>`.trim();
+    const newRow = [
+      `<tr>`,
+      `  <td><p>${safe(data.ticketId)}</p></td>`,
+      `  <td><p>${safe(data.summary)}</p></td>`,
+      `  <td><p>${safe(data.assignee) || "Unassigned"}</p></td>`,
+      `  <td><p>${safe(data.reporter)}</p></td>`,
+      `  <td><p>${safe(data.stageOnly) || "false"}</p></td>`,
+      `  <td><p><a href="${data.link || "#"}">View</a></p></td>`,
+      `</tr>`,
+    ].join("\n");
 
-    // Inject before the closing </tbody> tag
     if (!currentBody.includes("</tbody>")) {
-      throw new Error("Page body does not contain a </tbody> tag — template may be malformed.");
+      throw new Error("Page body missing </tbody> — the table template may be malformed.");
     }
     const updatedBody = currentBody.replace("</tbody>", `${newRow}\n</tbody>`);
 
-    // ── 6. Update the page (v2 PUT) ──────────────────────────────────────────
+    // ── 6. Update page ────────────────────────────────────────────────────────
     console.log("🔄 Updating page...");
-
     await confluenceV2.put(`/pages/${pageId}`, {
       id:      pageId,
       status:  "current",
       title:   pageTitle,
-      version: { number: currentVersion + 1 },  // ← must increment by exactly 1
-      body: {
-        representation: "storage",
-        value: updatedBody,
-      },
+      version: { number: currentVersion + 1 },
+      body:    { representation: "storage", value: updatedBody },
     });
 
-    console.log("🎉 SUCCESS — row added to Confluence page.");
+    console.log("🎉 SUCCESS");
     res.status(200).send("✅ Done");
 
   } catch (err) {
@@ -212,11 +184,10 @@ app.post("/jira-webhook", async (req, res) => {
   }
 });
 
-// ─── Start ───────────────────────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🌍 Server running on port ${PORT}`);
-  // Eagerly resolve spaceId at startup so the first webhook is fast
   getSpaceId().catch((err) =>
-    console.warn("⚠️  Could not pre-resolve spaceId at startup:", err.message)
+    console.warn("⚠️  spaceId pre-fetch failed:", err.message)
   );
 });
