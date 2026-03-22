@@ -7,11 +7,11 @@ app.use(express.json());
 const PORT      = process.env.PORT      || 5000;
 const EMAIL     = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
-const BASE_URL  = process.env.BASE_URL;   // e.g. https://your-org.atlassian.net
-const SPACE_KEY = process.env.SPACE_KEY;  // e.g. "REL"  (fallback only)
-const SPACE_ID  = process.env.SPACE_ID;   // e.g. "327691" ← set this directly!
+const BASE_URL  = process.env.BASE_URL;     // e.g. https://your-org.atlassian.net
+const SPACE_ID  = process.env.SPACE_ID;     // ← REQUIRED: numeric System key e.g. "327691"
+const SPACE_KEY = process.env.SPACE_KEY;    // fallback if SPACE_ID not set
 
-// ─── Auth header ─────────────────────────────────────────────────────────────
+// ─── Auth ─────────────────────────────────────────────────────────────────────
 const authHeader = "Basic " + Buffer.from(`${EMAIL}:${API_TOKEN}`).toString("base64");
 
 const confluenceV2 = axios.create({
@@ -23,47 +23,63 @@ const confluenceV2 = axios.create({
   },
 });
 
-// ─── Space ID resolution ─────────────────────────────────────────────────────
-//
-// The Confluence v2 API requires a NUMERIC spaceId (e.g. "327691").
-// You can find this on: Confluence → Space Settings → scroll to "System key".
-//
-// ✅ Best:     set  SPACE_ID=327691  in your env — used directly, no API call.
-// ⚠️  Fallback: if only SPACE_KEY is set we try the v1 lookup, but this can
-//              return 404 for spaces created on newer Confluence Cloud tenants.
+// ─── Cached values (resolved once at startup) ─────────────────────────────────
+let _cachedSpaceId   = SPACE_ID ? String(SPACE_ID) : null;
+let _cachedParentId  = null;   // space homepageId — required by v2 POST /pages
 
-let _cachedSpaceId = SPACE_ID ? String(SPACE_ID) : null;
-
+// ─── Step 1: Resolve numeric spaceId ─────────────────────────────────────────
 async function getSpaceId() {
-  if (_cachedSpaceId) {
-    console.log(`✅ spaceId: ${_cachedSpaceId}`);
-    return _cachedSpaceId;
-  }
+  if (_cachedSpaceId) return _cachedSpaceId;
 
   if (!SPACE_KEY) {
     throw new Error(
-      "No SPACE_ID or SPACE_KEY env var set. " +
-      "Add SPACE_ID=327691 to your environment (find it under Confluence → Space Settings → System key)."
+      "Set SPACE_ID=327691 in your env (the numeric 'System key' from Confluence → Space Settings)."
     );
   }
 
-  console.log(`🔍 SPACE_ID not set — falling back to v1 key lookup for "${SPACE_KEY}"...`);
+  console.log(`🔍 Resolving spaceId for key "${SPACE_KEY}" via v1...`);
   try {
     const res = await axios.get(
       `${BASE_URL}/wiki/rest/api/space/${encodeURIComponent(SPACE_KEY)}`,
       { headers: { Authorization: authHeader, Accept: "application/json" } }
     );
     _cachedSpaceId = String(res.data.id);
-    console.log(`✅ Resolved spaceId via key: ${_cachedSpaceId}`);
+    console.log(`✅ spaceId resolved: ${_cachedSpaceId}`);
     return _cachedSpaceId;
   } catch (err) {
-    const status = err.response?.status;
-    const msg    = err.response?.data?.message || err.message;
     throw new Error(
-      `v1 key lookup failed (HTTP ${status}): ${msg}. ` +
-      `→ Fix: set SPACE_ID=327691 in your env (the "System key" from Confluence Space Settings).`
+      `v1 key lookup failed (HTTP ${err.response?.status}). ` +
+      `Set SPACE_ID env var directly instead.`
     );
   }
+}
+
+// ─── Step 2: Resolve space homepageId (required as parentId for new pages) ───
+//
+// WHY: Confluence v2 POST /pages returns 404 if parentId is omitted.
+// Every space has a homepage (root page). We fetch it from the space object
+// and use it as the parent for all release wiki pages.
+//
+async function getParentId() {
+  if (_cachedParentId) return _cachedParentId;
+
+  const spaceId = await getSpaceId();
+  console.log(`🔍 Fetching homepageId for space ${spaceId}...`);
+
+  const res = await confluenceV2.get(`/spaces/${spaceId}`);
+  const homepageId = res.data.homepageId;
+
+  if (!homepageId) {
+    throw new Error(
+      `Space ${spaceId} has no homepageId. ` +
+      `This can happen if the space was just created and has no root page yet. ` +
+      `Create a page manually in the space first, then retry.`
+    );
+  }
+
+  _cachedParentId = String(homepageId);
+  console.log(`✅ parentId (homepageId): ${_cachedParentId}`);
+  return _cachedParentId;
 }
 
 // ─── Table template ───────────────────────────────────────────────────────────
@@ -100,7 +116,7 @@ app.post("/jira-webhook", async (req, res) => {
 
     const release = labelList.find((l) => l.includes("release-"));
     if (!release) {
-      console.log("❌ No release label found in:", labelList);
+      console.log("❌ No release label found:", labelList);
       return res.status(200).send("No release label — nothing to do.");
     }
 
@@ -108,8 +124,9 @@ app.post("/jira-webhook", async (req, res) => {
     const pageTitle   = `${releaseName} - CMS Wiki`;
     console.log("📄 Target page:", pageTitle);
 
-    // ── 2. Get numeric spaceId ────────────────────────────────────────────────
-    const spaceId = await getSpaceId();
+    // ── 2. Resolve spaceId + parentId (cached after first call) ──────────────
+    const spaceId  = await getSpaceId();
+    const parentId = await getParentId();
 
     // ── 3. Search for existing page ───────────────────────────────────────────
     const searchRes = await confluenceV2.get("/pages", {
@@ -119,23 +136,27 @@ app.post("/jira-webhook", async (req, res) => {
     let pageId, currentBody, currentVersion;
 
     if (searchRes.data.results.length === 0) {
-      // ── 4a. Create new page ─────────────────────────────────────────────────
+      // ── 4a. Create page (parentId is REQUIRED by v2 — omitting it = 404) ───
       console.log("🆕 Creating new page...");
+
       const createRes = await confluenceV2.post("/pages", {
         spaceId,
+        parentId,          // ← THE FIX: space homepage as parent
         status: "current",
         title:  pageTitle,
         body:   { representation: "storage", value: createTableHTML() },
       });
+
       pageId         = createRes.data.id;
       currentBody    = createRes.data.body.storage.value;
       currentVersion = createRes.data.version.number;
-      console.log(`✅ Created — id: ${pageId}, version: ${currentVersion}`);
+      console.log(`✅ Page created — id: ${pageId}, version: ${currentVersion}`);
 
     } else {
-      // ── 4b. Fetch existing page body ────────────────────────────────────────
+      // ── 4b. Fetch existing page ───────────────────────────────────────────
       console.log("📄 Page exists — fetching...");
       pageId = searchRes.data.results[0].id;
+
       const fullPageRes = await confluenceV2.get(`/pages/${pageId}`, {
         params: { "body-format": "storage" },
       });
@@ -144,7 +165,7 @@ app.post("/jira-webhook", async (req, res) => {
       console.log(`📝 Fetched — version: ${currentVersion}`);
     }
 
-    // ── 5. Inject new table row ───────────────────────────────────────────────
+    // ── 5. Build and inject new table row ─────────────────────────────────────
     const safe = (v) =>
       String(v || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 
@@ -160,7 +181,7 @@ app.post("/jira-webhook", async (req, res) => {
     ].join("\n");
 
     if (!currentBody.includes("</tbody>")) {
-      throw new Error("Page body missing </tbody> — the table template may be malformed.");
+      throw new Error("Page body missing </tbody> — table template may be malformed.");
     }
     const updatedBody = currentBody.replace("</tbody>", `${newRow}\n</tbody>`);
 
@@ -174,7 +195,7 @@ app.post("/jira-webhook", async (req, res) => {
       body:    { representation: "storage", value: updatedBody },
     });
 
-    console.log("🎉 SUCCESS");
+    console.log("🎉 SUCCESS — row added.");
     res.status(200).send("✅ Done");
 
   } catch (err) {
@@ -187,7 +208,8 @@ app.post("/jira-webhook", async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🌍 Server running on port ${PORT}`);
-  getSpaceId().catch((err) =>
-    console.warn("⚠️  spaceId pre-fetch failed:", err.message)
+  // Eagerly warm up both cached values at startup
+  getParentId().catch((err) =>
+    console.warn("⚠️  Startup pre-fetch failed:", err.message)
   );
 });
