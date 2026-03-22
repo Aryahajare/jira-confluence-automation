@@ -12,22 +12,20 @@ const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
 const SPACE_KEY = process.env.SPACE_KEY;
 
-// 🧪 STARTUP LOGS
 console.log("🚀 Server starting...");
-console.log("ENV CHECK:");
-console.log("EMAIL:", EMAIL ? "✅ Loaded" : "❌ Missing");
-console.log("API_TOKEN:", API_TOKEN ? "✅ Loaded" : "❌ Missing");
+console.log("EMAIL:", EMAIL ? "✅" : "❌");
+console.log("API_TOKEN:", API_TOKEN ? "✅" : "❌");
 console.log("BASE_URL:", BASE_URL);
 console.log("SPACE_KEY:", SPACE_KEY);
 
 const auth = Buffer.from(`${EMAIL}:${API_TOKEN}`).toString("base64");
 
-// 📌 HEALTH CHECK ROUTE (IMPORTANT FOR TEST)
+// ✅ Health check
 app.get("/", (req, res) => {
-  res.send("✅ Backend is running");
+  res.send("✅ Backend running");
 });
 
-// 📌 TABLE TEMPLATE
+// 📌 Table template
 const createTable = () => `
 <table>
   <tbody>
@@ -43,23 +41,21 @@ const createTable = () => `
 </table>
 `;
 
-// 🚀 WEBHOOK
 app.post("/jira-webhook", async (req, res) => {
   console.log("🔥 WEBHOOK HIT");
-  console.log("📩 HEADERS:", req.headers);
   console.log("📦 BODY:", req.body);
 
   try {
     const data = req.body;
 
-    // 🔍 Extract labels
-    const labels = data.labels || "";
-    console.log("🏷️ Labels:", labels);
-
-    const release = labels.split(",").find(l => l.includes("release-"));
+    // ✅ FIX LABEL HANDLING (array safe)
+    const labels = data.labels || [];
+    const release = Array.isArray(labels)
+      ? labels.find(l => l.includes("release-"))
+      : labels.split(",").find(l => l.includes("release-"));
 
     if (!release) {
-      console.log("❌ No release label found");
+      console.log("❌ No release label");
       return res.send("No release label");
     }
 
@@ -68,15 +64,24 @@ app.post("/jira-webhook", async (req, res) => {
 
     console.log("📄 Page Title:", pageTitle);
 
-    // 🔍 SEARCH PAGE
-    const searchRes = await axios.get(
-      `${BASE_URL}/wiki/rest/api/content?title=${encodeURIComponent(pageTitle)}&spaceKey=${SPACE_KEY}`,
+    // ✅ STEP 1: Validate space exists (important)
+    const spaceRes = await axios.get(
+      `${BASE_URL}/wiki/rest/api/space/${SPACE_KEY}`,
       {
         headers: { Authorization: `Basic ${auth}` }
       }
     );
 
-    console.log("🔍 Search result:", searchRes.data.size);
+    const realSpaceKey = spaceRes.data.key;
+    console.log("✅ Using Space Key:", realSpaceKey);
+
+    // 🔍 STEP 2: Search page
+    const searchRes = await axios.get(
+      `${BASE_URL}/wiki/rest/api/content?title=${encodeURIComponent(pageTitle)}&spaceKey=${realSpaceKey}`,
+      {
+        headers: { Authorization: `Basic ${auth}` }
+      }
+    );
 
     let pageId, content, version;
 
@@ -88,7 +93,7 @@ app.post("/jira-webhook", async (req, res) => {
         {
           type: "page",
           title: pageTitle,
-          space: { id: 425988 },
+          space: { key: realSpaceKey }, // ✅ CORRECT WAY
           body: {
             storage: {
               value: createTable(),
@@ -127,15 +132,15 @@ app.post("/jira-webhook", async (req, res) => {
       version = fullPage.data.version.number;
     }
 
-    // ➕ ADD ROW
+    // ➕ SAFE ROW INSERT
     const row = `
 <tr>
-<td>${data.ticketId}</td>
-<td>${data.summary}</td>
-<td>${data.assignee}</td>
-<td>${data.reporter}</td>
-<td>${data.stageOnly}</td>
-<td><a href="${data.link}">View</a></td>
+<td>${data.ticketId || ""}</td>
+<td>${data.summary || ""}</td>
+<td>${data.assignee || "Unassigned"}</td>
+<td>${data.reporter || ""}</td>
+<td>${data.stageOnly || "false"}</td>
+<td><a href="${data.link || "#"}">View</a></td>
 </tr>`;
 
     content = content.replace("</tbody>", `${row}</tbody>`);
@@ -164,9 +169,10 @@ app.post("/jira-webhook", async (req, res) => {
       }
     );
 
-    console.log("🎉 Confluence updated successfully");
+    console.log("🎉 SUCCESS: Confluence updated");
 
     res.send("✅ Done");
+
   } catch (err) {
     console.error("❌ ERROR:", err.response?.data || err.message);
     res.status(500).send("Error");
