@@ -12,6 +12,7 @@ const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
 const SPACE_KEY = process.env.SPACE_KEY;
 
+// 🧪 STARTUP LOGS
 console.log("🚀 Server starting...");
 console.log("EMAIL:", EMAIL ? "✅" : "❌");
 console.log("API_TOKEN:", API_TOKEN ? "✅" : "❌");
@@ -48,7 +49,7 @@ app.post("/jira-webhook", async (req, res) => {
   try {
     const data = req.body;
 
-    // ✅ FIX LABEL HANDLING (array safe)
+    // ✅ LABEL HANDLING (array-safe)
     const labels = data.labels || [];
     const release = Array.isArray(labels)
       ? labels.find(l => l.includes("release-"))
@@ -64,18 +65,30 @@ app.post("/jira-webhook", async (req, res) => {
 
     console.log("📄 Page Title:", pageTitle);
 
-    // ✅ STEP 1: Validate space exists (important)
+    // ✅ STEP 1: Resolve space via CQL (CORRECT METHOD)
     const spaceRes = await axios.get(
-      `${BASE_URL}/wiki/rest/api/space/${SPACE_KEY}`,
+      `${BASE_URL}/wiki/rest/api/search?cql=type=space AND space="${SPACE_KEY}"`,
       {
         headers: { Authorization: `Basic ${auth}` }
       }
     );
 
-    const realSpaceKey = spaceRes.data.key;
+    console.log("🔎 Space search result:", JSON.stringify(spaceRes.data, null, 2));
+
+    if (!spaceRes.data.results.length) {
+      throw new Error("❌ Space not found via CQL");
+    }
+
+    const realSpaceKey =
+      spaceRes.data.results[0].resultGlobalContainer?.space?.key;
+
+    if (!realSpaceKey) {
+      throw new Error("❌ Unable to extract space key");
+    }
+
     console.log("✅ Using Space Key:", realSpaceKey);
 
-    // 🔍 STEP 2: Search page
+    // 🔍 STEP 2: Search existing page
     const searchRes = await axios.get(
       `${BASE_URL}/wiki/rest/api/content?title=${encodeURIComponent(pageTitle)}&spaceKey=${realSpaceKey}`,
       {
@@ -93,7 +106,7 @@ app.post("/jira-webhook", async (req, res) => {
         {
           type: "page",
           title: pageTitle,
-          space: { key: realSpaceKey }, // ✅ CORRECT WAY
+          space: { key: realSpaceKey },
           body: {
             storage: {
               value: createTable(),
@@ -132,7 +145,7 @@ app.post("/jira-webhook", async (req, res) => {
       version = fullPage.data.version.number;
     }
 
-    // ➕ SAFE ROW INSERT
+    // ➕ ADD ROW SAFELY
     const row = `
 <tr>
 <td>${data.ticketId || ""}</td>
