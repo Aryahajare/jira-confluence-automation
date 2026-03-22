@@ -7,13 +7,19 @@ app.use(express.json());
 const PORT      = process.env.PORT      || 5000;
 const EMAIL     = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
-const BASE_URL  = process.env.BASE_URL;     // e.g. https://your-org.atlassian.net
-const SPACE_ID  = process.env.SPACE_ID;     // ← REQUIRED: numeric System key e.g. "327691"
-const SPACE_KEY = process.env.SPACE_KEY;    // fallback if SPACE_ID not set
+const BASE_URL  = process.env.BASE_URL;   // e.g. https://your-org.atlassian.net
+const SPACE_KEY = process.env.SPACE_KEY;  // e.g. "REL"  ← REQUIRED
 
 // ─── Auth ─────────────────────────────────────────────────────────────────────
 const authHeader = "Basic " + Buffer.from(`${EMAIL}:${API_TOKEN}`).toString("base64");
 
+// v1 client — used ONLY for the one-time space bootstrap (spaceId + homepageId)
+const confluenceV1 = axios.create({
+  baseURL: `${BASE_URL}/wiki/rest/api`,
+  headers: { Authorization: authHeader, Accept: "application/json" },
+});
+
+// v2 client — used for all page operations (search, create, update)
 const confluenceV2 = axios.create({
   baseURL: `${BASE_URL}/wiki/api/v2`,
   headers: {
@@ -23,63 +29,61 @@ const confluenceV2 = axios.create({
   },
 });
 
-// ─── Cached values (resolved once at startup) ─────────────────────────────────
-let _cachedSpaceId   = SPACE_ID ? String(SPACE_ID) : null;
-let _cachedParentId  = null;   // space homepageId — required by v2 POST /pages
+// ─── Cached bootstrap values (resolved once at startup) ──────────────────────
+//
+// STRATEGY:
+//   GET /wiki/rest/api/space/{key}?expand=homepage  (v1)
+//   → returns both:
+//       .id          → numeric spaceId   (needed for v2 page search/create)
+//       .homepage.id → numeric pageId    (needed as parentId for v2 POST /pages)
+//
+//   The v2 /spaces/{id} endpoint returns 404 because the "System key" shown
+//   in Confluence UI (e.g. 327691) is NOT the internal API space ID used by
+//   the v2 spaces endpoint. Only the v1 endpoint reliably maps key → both IDs.
+//
+let _spaceId   = null;
+let _parentId  = null;
 
-// ─── Step 1: Resolve numeric spaceId ─────────────────────────────────────────
-async function getSpaceId() {
-  if (_cachedSpaceId) return _cachedSpaceId;
+async function bootstrap() {
+  if (_spaceId && _parentId) return;
 
   if (!SPACE_KEY) {
-    throw new Error(
-      "Set SPACE_ID=327691 in your env (the numeric 'System key' from Confluence → Space Settings)."
-    );
+    throw new Error("SPACE_KEY env var is required (e.g. SPACE_KEY=REL).");
   }
 
-  console.log(`🔍 Resolving spaceId for key "${SPACE_KEY}" via v1...`);
+  console.log(`🔍 Bootstrapping space "${SPACE_KEY}"...`);
+
+  let res;
   try {
-    const res = await axios.get(
-      `${BASE_URL}/wiki/rest/api/space/${encodeURIComponent(SPACE_KEY)}`,
-      { headers: { Authorization: authHeader, Accept: "application/json" } }
-    );
-    _cachedSpaceId = String(res.data.id);
-    console.log(`✅ spaceId resolved: ${_cachedSpaceId}`);
-    return _cachedSpaceId;
+    res = await confluenceV1.get(`/space/${encodeURIComponent(SPACE_KEY)}`, {
+      params: { expand: "homepage" },
+    });
   } catch (err) {
+    const status = err.response?.status;
+    const msg    = err.response?.data?.message || err.message;
     throw new Error(
-      `v1 key lookup failed (HTTP ${err.response?.status}). ` +
-      `Set SPACE_ID env var directly instead.`
-    );
-  }
-}
-
-// ─── Step 2: Resolve space homepageId (required as parentId for new pages) ───
-//
-// WHY: Confluence v2 POST /pages returns 404 if parentId is omitted.
-// Every space has a homepage (root page). We fetch it from the space object
-// and use it as the parent for all release wiki pages.
-//
-async function getParentId() {
-  if (_cachedParentId) return _cachedParentId;
-
-  const spaceId = await getSpaceId();
-  console.log(`🔍 Fetching homepageId for space ${spaceId}...`);
-
-  const res = await confluenceV2.get(`/spaces/${spaceId}`);
-  const homepageId = res.data.homepageId;
-
-  if (!homepageId) {
-    throw new Error(
-      `Space ${spaceId} has no homepageId. ` +
-      `This can happen if the space was just created and has no root page yet. ` +
-      `Create a page manually in the space first, then retry.`
+      `Failed to bootstrap space "${SPACE_KEY}" (HTTP ${status}): ${msg}\n` +
+      `Check that SPACE_KEY, EMAIL, API_TOKEN, and BASE_URL are all correct.`
     );
   }
 
-  _cachedParentId = String(homepageId);
-  console.log(`✅ parentId (homepageId): ${_cachedParentId}`);
-  return _cachedParentId;
+  const space = res.data;
+
+  if (!space.id) {
+    throw new Error(`Space "${SPACE_KEY}" response missing 'id' field.`);
+  }
+  if (!space.homepage?.id) {
+    throw new Error(
+      `Space "${SPACE_KEY}" has no homepage. ` +
+      `Please create at least one page in the space manually, then restart the server.`
+    );
+  }
+
+  _spaceId  = String(space.id);
+  _parentId = String(space.homepage.id);
+
+  console.log(`✅ spaceId:   ${_spaceId}`);
+  console.log(`✅ parentId:  ${_parentId}  (space homepage)`);
 }
 
 // ─── Table template ───────────────────────────────────────────────────────────
@@ -124,9 +128,10 @@ app.post("/jira-webhook", async (req, res) => {
     const pageTitle   = `${releaseName} - CMS Wiki`;
     console.log("📄 Target page:", pageTitle);
 
-    // ── 2. Resolve spaceId + parentId (cached after first call) ──────────────
-    const spaceId  = await getSpaceId();
-    const parentId = await getParentId();
+    // ── 2. Bootstrap (cached after first call) ────────────────────────────────
+    await bootstrap();
+    const spaceId  = _spaceId;
+    const parentId = _parentId;
 
     // ── 3. Search for existing page ───────────────────────────────────────────
     const searchRes = await confluenceV2.get("/pages", {
@@ -136,15 +141,15 @@ app.post("/jira-webhook", async (req, res) => {
     let pageId, currentBody, currentVersion;
 
     if (searchRes.data.results.length === 0) {
-      // ── 4a. Create page (parentId is REQUIRED by v2 — omitting it = 404) ───
+      // ── 4a. Create new page ───────────────────────────────────────────────
       console.log("🆕 Creating new page...");
 
       const createRes = await confluenceV2.post("/pages", {
         spaceId,
-        parentId,          // ← THE FIX: space homepage as parent
-        status: "current",
-        title:  pageTitle,
-        body:   { representation: "storage", value: createTableHTML() },
+        parentId,           // ← required; omitting this causes 404
+        status:  "current",
+        title:   pageTitle,
+        body:    { representation: "storage", value: createTableHTML() },
       });
 
       pageId         = createRes.data.id;
@@ -153,7 +158,7 @@ app.post("/jira-webhook", async (req, res) => {
       console.log(`✅ Page created — id: ${pageId}, version: ${currentVersion}`);
 
     } else {
-      // ── 4b. Fetch existing page ───────────────────────────────────────────
+      // ── 4b. Fetch existing page ──────────────────────────────────────────
       console.log("📄 Page exists — fetching...");
       pageId = searchRes.data.results[0].id;
 
@@ -165,9 +170,12 @@ app.post("/jira-webhook", async (req, res) => {
       console.log(`📝 Fetched — version: ${currentVersion}`);
     }
 
-    // ── 5. Build and inject new table row ─────────────────────────────────────
+    // ── 5. Inject new table row ───────────────────────────────────────────────
     const safe = (v) =>
-      String(v || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      String(v || "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;");
 
     const newRow = [
       `<tr>`,
@@ -208,8 +216,8 @@ app.post("/jira-webhook", async (req, res) => {
 // ─── Start ────────────────────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🌍 Server running on port ${PORT}`);
-  // Eagerly warm up both cached values at startup
-  getParentId().catch((err) =>
-    console.warn("⚠️  Startup pre-fetch failed:", err.message)
+  // Pre-warm the bootstrap cache at startup so first webhook is instant
+  bootstrap().catch((err) =>
+    console.warn("⚠️  Startup bootstrap failed:", err.message)
   );
 });
