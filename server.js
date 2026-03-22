@@ -6,16 +6,10 @@ app.use(express.json());
 
 const PORT = process.env.PORT || 5000;
 
-// 🔐 ENV CONFIG (Render)
 const EMAIL = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
-
-// 🧪 STARTUP LOGS
-console.log("🚀 Server starting...");
-console.log("EMAIL:", EMAIL ? "✅" : "❌");
-console.log("API_TOKEN:", API_TOKEN ? "✅" : "❌");
-console.log("BASE_URL:", BASE_URL);
+const SPACE_KEY = process.env.SPACE_KEY;
 
 const auth = Buffer.from(`${EMAIL}:${API_TOKEN}`).toString("base64");
 
@@ -24,12 +18,22 @@ app.get("/", (req, res) => {
   res.send("✅ Backend running");
 });
 
-// 📌 RELEASE → PAGE MAPPING (FINAL)
-const releasePageMap = {
-  "release-1.0": "131111"
-};
+// 📌 Table template
+const createTable = () => `
+<table>
+  <tbody>
+    <tr>
+      <th>Ticket ID</th>
+      <th>Summary</th>
+      <th>Assignee</th>
+      <th>Reporter</th>
+      <th>Stage Only</th>
+      <th>Link</th>
+    </tr>
+  </tbody>
+</table>
+`;
 
-// 🚀 WEBHOOK
 app.post("/jira-webhook", async (req, res) => {
   console.log("🔥 WEBHOOK HIT");
   console.log("📦 BODY:", req.body);
@@ -37,7 +41,7 @@ app.post("/jira-webhook", async (req, res) => {
   try {
     const data = req.body;
 
-    // ✅ LABEL HANDLING
+    // ✅ labels handling
     const labels = data.labels || [];
     const release = Array.isArray(labels)
       ? labels.find(l => l.includes("release-"))
@@ -49,30 +53,72 @@ app.post("/jira-webhook", async (req, res) => {
     }
 
     const releaseName = release.trim();
+    const pageTitle = `${releaseName} - CMS Wiki`;
 
-    // ✅ GET PAGE ID FROM MAP
-    const pageId = releasePageMap[releaseName];
+    console.log("📄 Page Title:", pageTitle);
 
-    if (!pageId) {
-      console.log("❌ No page mapped for this release");
-      return res.send("No page mapped");
-    }
-
-    console.log("📄 Using Page ID:", pageId);
-
-    // 🔍 GET PAGE CONTENT
-    const fullPage = await axios.get(
-      `${BASE_URL}/wiki/rest/api/content/${pageId}?expand=body.storage,version`,
+    // 🔍 Search page inside SPACE
+    const searchRes = await axios.get(
+      `${BASE_URL}/wiki/rest/api/content`,
       {
+        params: {
+          title: pageTitle,
+          spaceKey: SPACE_KEY
+        },
         headers: { Authorization: `Basic ${auth}` }
       }
     );
 
-    let content = fullPage.data.body.storage.value;
-    const version = fullPage.data.version.number;
-    const title = fullPage.data.title;
+    let pageId, content, version;
 
-    // ➕ ADD ROW
+    if (searchRes.data.size === 0) {
+      console.log("🆕 Creating new page...");
+
+      const newPage = await axios.post(
+        `${BASE_URL}/wiki/rest/api/content`,
+        {
+          type: "page",
+          title: pageTitle,
+          space: { key: SPACE_KEY },
+          body: {
+            storage: {
+              value: createTable(),
+              representation: "storage"
+            }
+          }
+        },
+        {
+          headers: {
+            Authorization: `Basic ${auth}`,
+            "Content-Type": "application/json"
+          }
+        }
+      );
+
+      pageId = newPage.data.id;
+      content = newPage.data.body.storage.value;
+      version = newPage.data.version.number;
+
+      console.log("✅ Page created:", pageId);
+
+    } else {
+      console.log("📄 Page exists");
+
+      pageId = searchRes.data.results[0].id;
+
+      const fullPage = await axios.get(
+        `${BASE_URL}/wiki/rest/api/content/${pageId}`,
+        {
+          params: { expand: "body.storage,version" },
+          headers: { Authorization: `Basic ${auth}` }
+        }
+      );
+
+      content = fullPage.data.body.storage.value;
+      version = fullPage.data.version.number;
+    }
+
+    // ➕ Add row
     const row = `
 <tr>
 <td>${data.ticketId || ""}</td>
@@ -87,13 +133,13 @@ app.post("/jira-webhook", async (req, res) => {
 
     console.log("📝 Updating page...");
 
-    // 🔄 UPDATE PAGE
+    // 🔄 Update page
     await axios.put(
       `${BASE_URL}/wiki/rest/api/content/${pageId}`,
       {
         version: { number: version + 1 },
         type: "page",
-        title: title,
+        title: pageTitle,
         body: {
           storage: {
             value: content,
@@ -109,7 +155,7 @@ app.post("/jira-webhook", async (req, res) => {
       }
     );
 
-    console.log("🎉 SUCCESS: Page updated");
+    console.log("🎉 SUCCESS");
 
     res.send("✅ Done");
 
@@ -120,5 +166,5 @@ app.post("/jira-webhook", async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`🌍 Server running on port ${PORT}`);
+  console.log(`🌍 Server running on ${PORT}`);
 });
