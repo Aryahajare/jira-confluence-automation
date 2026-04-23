@@ -234,7 +234,13 @@ async function bootstrapSpace() {
       return;
     } catch (err) {
       console.error("❌ Failed to create space automatically:", err.response?.data || err.message);
-      throw err;
+      console.log("🔧 MANUAL SPACE CREATION REQUIRED:");
+      console.log(`   - Go to Confluence: ${CONFLUENCE_BASE_URL}/wiki/spaces/createspace-start.action`);
+      console.log(`   - Create space with Key: ${SPACE_KEY}`);
+      console.log(`   - Name: ${SPACE_NAME}`);
+      console.log(`   - Description: ${SPACE_DESCRIPTION}`);
+      console.log(`   - Then update SPACE_ID env var with the new space ID`);
+      throw new Error(`Space ${SPACE_KEY} not found and cannot be created automatically. Please create manually and set SPACE_ID.`);
     }
   }
 
