@@ -4,318 +4,262 @@ import axios from "axios";
 const app = express();
 app.use(express.json());
 
-// ─── ENV ──────────────────────────────────────────────────────────────────────
-const PORT       = process.env.PORT       || 5000;
-const EMAIL      = process.env.EMAIL;        // your Atlassian account email
-const API_TOKEN  = process.env.API_TOKEN;    // your Atlassian API token
-const BASE_URL   = process.env.BASE_URL;     // https://your-org.atlassian.net
-const SPACE_KEY  = process.env.SPACE_KEY  || "REL";  // key of your EXISTING space
+// ─── ENV ─────────────────────────────────────────────────────────────
+const PORT       = process.env.PORT || 5000;
+const EMAIL      = process.env.EMAIL;
+const API_TOKEN  = process.env.API_TOKEN;
+const BASE_URL   = process.env.BASE_URL;
+const SPACE_KEY  = process.env.SPACE_KEY || "REL";
 
 ["EMAIL", "API_TOKEN", "BASE_URL"].forEach((k) => {
-  if (!process.env[k]) { console.error(`❌ Missing env var: ${k}`); process.exit(1); }
+  if (!process.env[k]) {
+    console.error(`❌ Missing env var: ${k}`);
+    process.exit(1);
+  }
 });
 
-// ─── Auth ─────────────────────────────────────────────────────────────────────
+// ─── AUTH ────────────────────────────────────────────────────────────
 const authHeader = "Basic " + Buffer.from(`${EMAIL}:${API_TOKEN}`).toString("base64");
+
 const hdrs = {
   Authorization: authHeader,
   "Content-Type": "application/json",
   Accept: "application/json",
 };
 
-// ─── ONE axios client (v2 only — no v1, no space creation) ───────────────────
-//
-//  WHY NO V1:   GET /wiki/rest/api/space/{key} returns 404 for newer tenants.
-//  WHY NO CREATE: POST /spaces (v2) is RBAC-beta-only → 404 for most accounts.
-//               POST /wiki/rest/api/space (v1) requires Confluence Admin
-//               "Create Space" global permission → 403 for regular users.
-//
-//  SOLUTION:    Use GET /wiki/api/v2/spaces (paginated list) to find our space
-//               by matching .key === SPACE_KEY. The list response includes
-//               both .id (spaceId) and .homepageId (parentId for new pages).
-//
-const v2 = axios.create({ baseURL: `${BASE_URL}/wiki/api/v2`, headers: hdrs });
+// Confluence v2
+const v2 = axios.create({
+  baseURL: `${BASE_URL}/wiki/api/v2`,
+  headers: hdrs,
+});
 
-// ─── Universal call wrapper (full request + response logged) ──────────────────
-async function api(label, method, url, payload, params) {
-  const fullUrl = `${v2.defaults.baseURL}${url}`;
+// Jira API
+const jira = axios.create({
+  baseURL: `${BASE_URL}/rest/api/3`,
+  headers: hdrs,
+});
+
+// ─── API LOGGER ──────────────────────────────────────────────────────
+async function api(label, client, method, url, payload, params) {
   console.log(`\n${"─".repeat(60)}`);
-  console.log(`⏳ [${label}]  ${method.toUpperCase()} ${fullUrl}`);
-  if (params)  console.log(`   PARAMS   : ${JSON.stringify(params)}`);
-  if (payload) console.log(`   PAYLOAD  :\n${JSON.stringify(payload, null, 2)}`);
+  console.log(`⏳ [${label}] ${method.toUpperCase()} ${url}`);
+  if (params) console.log("PARAMS:", params);
+  if (payload) console.log("PAYLOAD:", JSON.stringify(payload, null, 2));
 
   try {
-    const res = await v2.request({ method, url, data: payload, params });
-    console.log(`   STATUS   : ${res.status} ✅`);
-    console.log(`   RESPONSE :\n${JSON.stringify(res.data, null, 2)}`);
-    console.log(`${"─".repeat(60)}\n`);
+    const res = await client.request({ method, url, data: payload, params });
+    console.log(`✅ STATUS: ${res.status}`);
     return res.data;
   } catch (err) {
-    const status = err.response?.status ?? "NO_RESPONSE";
-    const body   = err.response?.data   ?? err.message;
-    console.log(`   STATUS   : ${status} ❌`);
-    console.log(`   ERROR    :\n${JSON.stringify(body, null, 2)}`);
-    console.log(`${"─".repeat(60)}\n`);
+    console.error(`❌ ERROR:`, err.response?.data || err.message);
     throw err;
   }
 }
 
-// ─── Bootstrap: find SPACE_KEY in paginated v2 /spaces list ──────────────────
-//
-//  v2 GET /spaces returns ALL spaces in pages. We walk them until we find
-//  one where space.key === SPACE_KEY. Both .id and .homepageId live on the
-//  same object so one pass gives us everything.
-//
-let _spaceId  = null;
+// ─── BOOTSTRAP ───────────────────────────────────────────────────────
+let _spaceId = null;
 let _parentId = null;
 
 async function bootstrapSpace() {
-  if (_spaceId && _parentId) {
-    console.log(`✅ Bootstrap cache hit → spaceId=${_spaceId}  parentId=${_parentId}`);
-    return;
-  }
+  if (_spaceId && _parentId) return;
 
-  console.log(`\n${"═".repeat(60)}`);
-  console.log(`🚀 BOOTSTRAP — searching for space key="${SPACE_KEY}" via v2 list`);
-  console.log(`${"═".repeat(60)}`);
+  console.log("🚀 Bootstrapping space...");
 
-  let cursor = null;
-  let found  = null;
-  let page   = 0;
+  const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
 
-  do {
-    page++;
-    const params = { limit: 50 };
-    if (cursor) params.cursor = cursor;
+  const found = data.results.find((s) => s.key === SPACE_KEY);
 
-    const data = await api(`LIST SPACES page=${page}`, "get", "/spaces", undefined, params);
+  if (!found) throw new Error("Space not found");
 
-    console.log(`   Checking ${data.results?.length ?? 0} spaces on page ${page}...`);
-    data.results?.forEach((s) => {
-      console.log(`     • key="${s.key}"  id=${s.id}  homepageId=${s.homepageId}  name="${s.name}"`);
-    });
+  _spaceId = found.id;
+  _parentId = found.homepageId;
 
-    found = data.results?.find((s) => s.key === SPACE_KEY);
-    if (found) break;
-
-    // Pagination: extract cursor from _links.next
-    const next = data._links?.next;
-    if (next) {
-      const m = next.match(/cursor=([^&]+)/);
-      cursor = m ? decodeURIComponent(m[1]) : null;
-    } else {
-      cursor = null;
-    }
-  } while (cursor);
-
-  if (!found) {
-    throw new Error(
-      `Space key="${SPACE_KEY}" was not found after scanning all visible spaces. ` +
-      `Check that your API token has Confluence access and that key "${SPACE_KEY}" is correct.`
-    );
-  }
-
-  console.log(`\n✅ Found space "${SPACE_KEY}":`);
-  console.log(JSON.stringify(found, null, 2));
-
-  if (!found.homepageId) {
-    // Rare: list response omits homepageId — fetch space directly by id
-    console.log(`⚠️  homepageId missing in list — fetching space detail...`);
-    const detail = await api("GET SPACE DETAIL", "get", `/spaces/${found.id}`);
-    found.homepageId = detail.homepageId;
-    console.log(`   homepageId from detail: ${found.homepageId}`);
-  }
-
-  if (!found.homepageId) {
-    throw new Error(
-      `Space "${SPACE_KEY}" has no homepageId even after detail fetch. ` +
-      `Create at least one page manually in this space, then restart the server.`
-    );
-  }
-
-  _spaceId  = String(found.id);
-  _parentId = String(found.homepageId);
-
-  console.log(`\n✅ Bootstrap complete!`);
-  console.log(`   spaceId  : ${_spaceId}`);
-  console.log(`   parentId : ${_parentId} (space homepage — used as parent for new pages)\n`);
+  console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId}`);
 }
 
-// ─── Table template ───────────────────────────────────────────────────────────
+// ─── TABLE TEMPLATE ──────────────────────────────────────────────────
 const createTableHTML = () => `
-<table data-table-width="760" data-layout="default">
+<table>
   <tbody>
     <tr>
-      <th><p><strong>Ticket ID</strong></p></th>
-      <th><p><strong>Summary</strong></p></th>
-      <th><p><strong>Assignee</strong></p></th>
-      <th><p><strong>Reporter</strong></p></th>
-      <th><p><strong>Stage Only</strong></p></th>
-      <th><p><strong>Link</strong></p></th>
+      <th>SB / Acquia</th>
+      <th>Stage Only</th>
+      <th>CI Dep ID</th>
+      <th>PID</th>
+      <th>Brief Description</th>
+      <th>FE Dev Contact</th>
+      <th>CI Contact</th>
+      <th>Feed URL</th>
+      <th>Deployment Status (Stage)</th>
     </tr>
   </tbody>
-</table>`.trim();
+</table>
+`.trim();
 
-// ─── /debug — hit this first to verify auth + space visibility ────────────────
-app.get("/debug", async (req, res) => {
-  console.log("\n🔬 /debug hit");
-  const report = { env: {}, currentUser: null, spaces: [], targetSpace: null, error: null };
-
-  report.env = {
-    BASE_URL,
-    EMAIL,
-    SPACE_KEY,
-    API_TOKEN: API_TOKEN ? `${API_TOKEN.slice(0, 6)}...` : "NOT SET",
-  };
-
-  try {
-    // Who am I?
-    const me = await api("GET CURRENT USER", "get", "/users/current");
-    report.currentUser = { id: me.accountId, displayName: me.displayName, email: me.email };
-  } catch (e) {
-    report.error = `GET /users/current failed: ${e.response?.status} ${JSON.stringify(e.response?.data)}`;
-    return res.status(500).json(report);
-  }
-
-  try {
-    // List first page of spaces
-    const spaces = await api("LIST SPACES (debug)", "get", "/spaces", undefined, { limit: 50 });
-    report.spaces = spaces.results?.map((s) => ({
-      key: s.key, id: s.id, homepageId: s.homepageId, name: s.name,
-    }));
-    report.targetSpace = report.spaces.find((s) => s.key === SPACE_KEY) ?? "NOT FOUND IN FIRST 50";
-  } catch (e) {
-    report.error = `GET /spaces failed: ${e.response?.status} ${JSON.stringify(e.response?.data)}`;
-  }
-
-  res.json(report);
-});
-
-// ─── Health check ─────────────────────────────────────────────────────────────
-app.get("/", (req, res) => res.send("✅ Backend running — hit GET /debug to verify auth & space"));
-
-// ─── Webhook ──────────────────────────────────────────────────────────────────
+// ─── WEBHOOK ─────────────────────────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
-  console.log(`\n${"═".repeat(60)}`);
-  console.log("🔥 WEBHOOK HIT");
-  console.log(`${"═".repeat(60)}`);
-  console.log("📦 BODY:\n" + JSON.stringify(req.body, null, 2));
+  console.log("\n🔥 WEBHOOK RECEIVED");
 
   try {
     const data = req.body;
+    console.log("📦 Incoming Payload:", JSON.stringify(data, null, 2));
 
-    // ── 1. Extract release label ──────────────────────────────────────────────
-    const labels    = data.labels || [];
-    const labelList = Array.isArray(labels)
-      ? labels
-      : String(labels).split(",").map((l) => l.trim());
+    // ─── FIELD EXTRACTION ────────────────────────────────────────────
+    const ticketId = data.ticketId;
+    const title = data.title;
+    const reporter = data.reporter;
+    const assignee = data.assignee;
+    const jiraLink = data.jiraLink;
 
-    console.log(`🏷  Labels: ${JSON.stringify(labelList)}`);
-    const release = labelList.find((l) => l.includes("release-"));
-    if (!release) {
-      console.log("⏭  No release-* label — skipping.");
-      return res.status(200).send("No release label — nothing to do.");
+    const fixVersion = data.fixVersion; // customfield
+    const portfolioEpic = data.portfolioEpic;
+    const stageOnly = data.stageOnly;
+    const stageDeploymentDate = data.stageDeploymentDate;
+
+    console.log("📊 Extracted Fields:", {
+      ticketId,
+      title,
+      fixVersion,
+      portfolioEpic,
+    });
+
+    // ─── PAGE NAME FROM FIX VERSION ─────────────────────────────────
+    if (!fixVersion) {
+      console.log("⏭ No fixVersion → skipping");
+      return res.send("No fixVersion");
     }
 
-    const pageTitle = `${release.trim()} - CMS Wiki`;
-    console.log(`📄 Target page: "${pageTitle}"`);
+    const pageTitle = `${fixVersion} - CMS Release`;
+    console.log("📄 Page Title:", pageTitle);
 
-    // ── 2. Bootstrap (cached) ─────────────────────────────────────────────────
+    // ─── PID LOGIC ──────────────────────────────────────────────────
+    let pid = "";
+    if (portfolioEpic) {
+      pid = String(portfolioEpic).split(":")[0].trim();
+    }
+
+    console.log("🆔 PID:", pid);
+
+    // ─── SB / ACQUIA EXTRACTION ─────────────────────────────────────
+    let sbValue = "";
+    const match = title.match(/\[(.*?)\]/);
+    if (match) sbValue = match[1];
+
+    console.log("🏷 SB/Acquia:", sbValue);
+
+    // ─── FETCH FEED URL FROM JIRA LINKS ─────────────────────────────
+    console.log("🔗 Fetching Jira remote links...");
+
+    const linksData = await api(
+      "GET ISSUE LINKS",
+      jira,
+      "get",
+      `/issue/${ticketId}/remotelink`
+    );
+
+    const feedLinks = linksData
+      .filter((l) =>
+        l.object?.title?.toLowerCase().includes("feed url")
+      )
+      .map((l) => l.object.url);
+
+    const feedURL = feedLinks.join("<br/>");
+
+    console.log("🌐 Feed URLs:", feedLinks);
+
+    // ─── BOOTSTRAP ─────────────────────────────────────────────────
     await bootstrapSpace();
 
-    // ── 3. Search for existing page ───────────────────────────────────────────
-    const searchData = await api("SEARCH PAGE", "get", "/pages", undefined, {
-      spaceId: _spaceId,
-      title: pageTitle,
-      "body-format": "storage",
-      limit: 1,
-    });
+    // ─── SEARCH PAGE ───────────────────────────────────────────────
+    const search = await api(
+      "SEARCH PAGE",
+      v2,
+      "get",
+      "/pages",
+      null,
+      {
+        spaceId: _spaceId,
+        title: pageTitle,
+        limit: 1,
+      }
+    );
 
-    let pageId, currentBody, currentVersion;
+    let pageId, currentBody, version;
 
-    if (searchData.results.length === 0) {
-      // ── 4a. Create new page ───────────────────────────────────────────────
-      console.log("🆕 Page not found — creating...");
-      const created = await api("CREATE PAGE", "post", "/pages", {
-        spaceId:  _spaceId,
-        parentId: _parentId,   // ← space homepage; required by v2 or you get 404
-        status:   "current",
-        title:    pageTitle,
-        body:     { representation: "storage", value: createTableHTML() },
+    if (search.results.length === 0) {
+      console.log("🆕 Creating page...");
+
+      const created = await api("CREATE PAGE", v2, "post", "/pages", {
+        spaceId: _spaceId,
+        parentId: _parentId,
+        title: pageTitle,
+        status: "current",
+        body: {
+          representation: "storage",
+          value: createTableHTML(),
+        },
       });
 
-      pageId         = created.id;
-      currentBody    = created.body?.storage?.value ?? createTableHTML();
-      currentVersion = created.version?.number ?? 1;
-      console.log(`✅ Page created — id=${pageId}, version=${currentVersion}`);
-
-    } else {
-      // ── 4b. Fetch existing page body ─────────────────────────────────────
-      console.log("📄 Page exists — fetching...");
-      pageId = searchData.results[0].id;
-      const full = await api("GET PAGE BODY", "get", `/pages/${pageId}`, undefined, {
-        "body-format": "storage",
-      });
-      currentBody    = full.body?.storage?.value;
-      currentVersion = full.version?.number;
-      console.log(`📝 Fetched — version=${currentVersion}`);
-    }
-
-    // ── 5. Inject new row ─────────────────────────────────────────────────────
-    const safe = (v) =>
-      String(v || "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
-
-    const newRow = [
-      `<tr>`,
-      `  <td><p>${safe(data.ticketId)}</p></td>`,
-      `  <td><p>${safe(data.summary)}</p></td>`,
-      `  <td><p>${safe(data.assignee) || "Unassigned"}</p></td>`,
-      `  <td><p>${safe(data.reporter)}</p></td>`,
-      `  <td><p>${safe(data.stageOnly) || "false"}</p></td>`,
-      `  <td><p><a href="${data.link || "#"}">View</a></p></td>`,
-      `</tr>`,
-    ].join("\n");
-
-    if (!currentBody?.includes("</tbody>")) {
-      console.warn("⚠️  No </tbody> found — reinitialising table.");
+      pageId = created.id;
+      version = 1;
       currentBody = createTableHTML();
-    }
-    const updatedBody = currentBody.replace("</tbody>", `${newRow}\n</tbody>`);
+    } else {
+      console.log("📄 Page exists, fetching...");
 
-    // ── 6. Update page ────────────────────────────────────────────────────────
-    await api("UPDATE PAGE", "put", `/pages/${pageId}`, {
-      id:      pageId,
-      status:  "current",
-      title:   pageTitle,
-      version: { number: currentVersion + 1 },
-      body:    { representation: "storage", value: updatedBody },
+      pageId = search.results[0].id;
+
+      const full = await api(
+        "GET PAGE",
+        v2,
+        "get",
+        `/pages/${pageId}`,
+        null,
+        { "body-format": "storage" }
+      );
+
+      currentBody = full.body.storage.value;
+      version = full.version.number;
+    }
+
+    // ─── NEW ROW ───────────────────────────────────────────────────
+    const newRow = `
+<tr>
+<td>${sbValue}</td>
+<td>${stageOnly}</td>
+<td><a href="${jiraLink}">${jiraLink}</a></td>
+<td>${pid}</td>
+<td>${title}</td>
+<td>${reporter}</td>
+<td>${assignee}</td>
+<td>${feedURL}</td>
+<td>${stageDeploymentDate}</td>
+</tr>
+`;
+
+    const updatedBody = currentBody.replace("</tbody>", `${newRow}</tbody>`);
+
+    // ─── UPDATE PAGE ───────────────────────────────────────────────
+    await api("UPDATE PAGE", v2, "put", `/pages/${pageId}`, {
+      id: pageId,
+      status: "current",
+      title: pageTitle,
+      version: { number: version + 1 },
+      body: {
+        representation: "storage",
+        value: updatedBody,
+      },
     });
 
-    console.log("🎉 SUCCESS — ticket row appended.");
-    res.status(200).send("✅ Done");
+    console.log("🎉 SUCCESS");
+    res.send("Done");
 
   } catch (err) {
-    const detail = err.response?.data ?? err.message;
-    console.error("❌ WEBHOOK ERROR:\n" + JSON.stringify(detail, null, 2));
-    res.status(500).json({ error: "Internal error", detail });
+    console.error("❌ ERROR:", err.response?.data || err.message);
+    res.status(500).send("Error");
   }
 });
 
-// ─── Start ────────────────────────────────────────────────────────────────────
-app.listen(PORT, async () => {
-  console.log(`\n🌍 Server starting on port ${PORT}`);
-  console.log(`   BASE_URL  : ${BASE_URL}`);
-  console.log(`   EMAIL     : ${EMAIL}`);
-  console.log(`   SPACE_KEY : ${SPACE_KEY}`);
-  console.log(`\n   👉 Hit GET /debug to verify auth & confirm space is visible\n`);
-
-  try {
-    await bootstrapSpace();
-  } catch (err) {
-    console.error("❌ Bootstrap failed at startup:", err.message);
-    console.warn("⚠️  Server still running — bootstrap retries on first webhook.");
-  }
+// ─── START ───────────────────────────────────────────────────────────
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on ${PORT}`);
 });
