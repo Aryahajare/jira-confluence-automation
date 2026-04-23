@@ -294,6 +294,44 @@ async function getFeedUrls(issueKey) {
   }
 }
 
+async function runWebhookAccessDiagnostics() {
+  console.log("\n🔧 WEBHOOK ACCESS DIAGNOSTICS START");
+  const result = {
+    confluenceUser: null,
+    spaceByKey: null,
+    spaceList: null,
+  };
+
+  try {
+    const confluenceUser = await api("CONFLUENCE USER", v1, "get", "/user/current");
+    result.confluenceUser = { ok: true, user: confluenceUser.displayName || confluenceUser.username || confluenceUser.accountId };
+  } catch (err) {
+    result.confluenceUser = { ok: false, error: err.response?.data || err.message };
+  }
+
+  try {
+    const spaceData = await api("CONFLUENCE SPACE BY KEY", v1, "get", `/space/${SPACE_KEY}`, null, { expand: "homepage" });
+    result.spaceByKey = { ok: true, key: spaceData.key, id: spaceData.id, name: spaceData.name };
+  } catch (err) {
+    result.spaceByKey = { ok: false, error: err.response?.data || err.message };
+  }
+
+  try {
+    const spacesData = await api("CONFLUENCE LIST SPACES", v1, "get", "/space", null, { limit: 50 });
+    result.spaceList = {
+      ok: true,
+      count: spacesData.size || spacesData.results?.length || 0,
+      sample: (spacesData.results || []).slice(0, 10).map((s) => ({ id: s.id, key: s.key, name: s.name })),
+    };
+  } catch (err) {
+    result.spaceList = { ok: false, error: err.response?.data || err.message };
+  }
+
+  console.log("🔧 WEBHOOK ACCESS DIAGNOSTICS RESULT:", JSON.stringify(result, null, 2));
+  console.log("🔧 WEBHOOK ACCESS DIAGNOSTICS END\n");
+  return result;
+}
+
 app.get("/diagnostics", async (req, res) => {
   console.log("\n🔍 Diagnostics requested");
 
@@ -350,6 +388,8 @@ app.get("/diagnostics", async (req, res) => {
 // ─── WEBHOOK ─────────────────────────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK RECEIVED");
+
+  await runWebhookAccessDiagnostics();
 
   try {
     const data = req.body;
