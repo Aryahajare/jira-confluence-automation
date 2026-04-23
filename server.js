@@ -310,7 +310,18 @@ async function runWebhookAccessDiagnostics() {
 
   try {
     const confluenceUser = await api("CONFLUENCE USER", v1, "get", "/user/current");
-    result.confluenceUser = { ok: true, user: confluenceUser.displayName || confluenceUser.username || confluenceUser.accountId };
+    const isAnonymous = confluenceUser.type === "anonymous";
+    
+    if (isAnonymous) {
+      console.warn("⚠️ WARNING: API returned ANONYMOUS user - Basic auth may not be working!");
+      result.confluenceUser = { 
+        ok: false, 
+        error: "ANONYMOUS user returned - API token authentication failed",
+        hint: "Check if API token is valid, not expired, and has Confluence scopes enabled"
+      };
+    } else {
+      result.confluenceUser = { ok: true, user: confluenceUser.displayName || confluenceUser.username || confluenceUser.accountId };
+    }
   } catch (err) {
     result.confluenceUser = { ok: false, error: err.response?.data || err.message };
   }
