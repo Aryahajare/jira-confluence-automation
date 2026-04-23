@@ -96,6 +96,29 @@ const createTableHTML = () => `
 </table>
 `.trim();
 
+async function getFeedUrls(issueKey) {
+  console.log(`🔗 Fetching Web Links (Remote Links) for ${issueKey}`);
+
+  try {
+    const res = await jira.get(`/issue/${issueKey}/remotelink`);
+
+    console.log("📦 Remote Links Response:", JSON.stringify(res.data, null, 2));
+
+    const feedLinks = res.data
+      .filter(link => link.object?.title === "Feed URL")
+      .map(link => link.object?.url)
+      .filter(Boolean);
+
+    console.log("✅ Extracted Feed URLs:", feedLinks);
+
+    return feedLinks.join("<br/>") || "N/A";
+
+  } catch (err) {
+    console.error("❌ Failed to fetch remote links:", err.response?.data || err.message);
+    return "N/A";
+  }
+}
+
 // ─── WEBHOOK ─────────────────────────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK RECEIVED");
@@ -148,24 +171,7 @@ app.post("/jira-webhook", async (req, res) => {
     console.log("🏷 SB/Acquia:", sbValue);
 
     // ─── FETCH FEED URL FROM JIRA LINKS ─────────────────────────────
-    console.log("🔗 Fetching Jira remote links...");
-
-    const linksData = await api(
-      "GET ISSUE LINKS",
-      jira,
-      "get",
-      `/issue/${ticketId}/remotelink`
-    );
-
-    const feedLinks = linksData
-      .filter((l) =>
-        l.object?.title?.toLowerCase().includes("feed url")
-      )
-      .map((l) => l.object.url);
-
-    const feedURL = feedLinks.join("<br/>");
-
-    console.log("🌐 Feed URLs:", feedLinks);
+    const feedURL = await getFeedUrls(ticketId);
 
     // ─── BOOTSTRAP ─────────────────────────────────────────────────
     await bootstrapSpace();
