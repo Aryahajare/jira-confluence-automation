@@ -11,9 +11,11 @@ const API_TOKEN  = process.env.API_TOKEN;
 const BASE_URL   = process.env.BASE_URL;
 const JIRA_BASE_URL = process.env.JIRA_BASE_URL || BASE_URL;
 const CONFLUENCE_BASE_URL = process.env.CONFLUENCE_BASE_URL || BASE_URL;
-const SPACE_KEY  = process.env.SPACE_KEY || "REL";
-const SPACE_ID   = process.env.SPACE_ID;
-const PARENT_ID  = process.env.PARENT_ID;
+const SPACE_KEY         = process.env.SPACE_KEY || "REL";
+const SPACE_NAME        = process.env.SPACE_NAME || SPACE_KEY;
+const SPACE_DESCRIPTION = process.env.SPACE_DESCRIPTION || "Automatically created space for CMS Release pages";
+const SPACE_ID          = process.env.SPACE_ID;
+const PARENT_ID         = process.env.PARENT_ID;
 
 ["EMAIL", "API_TOKEN", "BASE_URL"].forEach((k) => {
   if (!process.env[k]) {
@@ -125,6 +127,26 @@ async function findPage(pageTitle) {
   }
 }
 
+async function createSpace() {
+  console.log(`🆕 Creating Confluence space ${SPACE_KEY}`);
+
+  const payload = {
+    key: SPACE_KEY,
+    name: SPACE_NAME,
+    description: {
+      plain: {
+        value: SPACE_DESCRIPTION,
+        representation: "plain",
+      },
+    },
+  };
+
+  const created = await api("CREATE SPACE", v1, "post", "/space", payload);
+  console.log(`✅ Created space: ${created.key} (${created.id})`);
+
+  return created;
+}
+
 async function bootstrapSpace() {
   if (_spaceId && _parentId) return;
 
@@ -145,7 +167,6 @@ async function bootstrapSpace() {
 
   if (_spaceId && !_parentId) {
     console.log(`⚠️ Using provided space ID ${_spaceId} without parentId; will create page at top-level if needed.`);
-    // Verify the space exists and is accessible
     try {
       const spaceCheck = await api(
         "VERIFY SPACE ACCESS",
@@ -156,38 +177,41 @@ async function bootstrapSpace() {
         { expand: "name" }
       );
       console.log(`✅ Space verified: ${spaceCheck.name} (${spaceCheck.key})`);
+      _parentId = spaceCheck.homepageId || spaceCheck.homepage?.id;
+      return;
     } catch (err) {
-      if (err.response?.status === 404) {
-        console.error(`❌ SPACE NOT FOUND: Space ID ${_spaceId} does not exist or you don't have access to it`);
-        console.error(`💡 SOLUTION: Check SPACE_ID or grant Confluence access to the API token user`);
-      } else if (err.response?.status === 403) {
-        console.error(`❌ ACCESS DENIED: No permission to access space ID ${_spaceId}`);
-        console.error(`💡 SOLUTION: Grant space access to the API token user account`);
-      } else {
-        console.error(`❌ SPACE VERIFICATION FAILED:`, err.response?.data || err.message);
-      }
+      console.warn(`⚠️ Provided SPACE_ID ${_spaceId} is not accessible, falling back to SPACE_KEY ${SPACE_KEY}`);
+      _spaceId = null;
+    }
+  }
+
+  console.log(`⚠️ Resolving Confluence space by key ${SPACE_KEY}`);
+
+  let spaceData;
+  try {
+    const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
+    spaceData = data.results.find((s) => s.key === SPACE_KEY);
+  } catch (err) {
+    console.warn("⚠️ Unable to list spaces by key, attempting direct space creation if allowed");
+  }
+
+  if (!spaceData) {
+    try {
+      const created = await createSpace();
+      _spaceId = created.id;
+      _parentId = created.homepageId || created.homepage?.id;
+      console.log(`✅ Created and bootstrapped space: ${created.key} (${created.id})`);
+      return;
+    } catch (err) {
+      console.error("❌ Failed to create space automatically:", err.response?.data || err.message);
       throw err;
     }
-    return;
   }
 
-  console.log(`⚠️ No SPACE_ID provided, resolving from SPACE_KEY ${SPACE_KEY}`);
+  _spaceId = spaceData.id;
+  _parentId = spaceData.homepageId;
 
-  const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
-
-  const found = data.results.find((s) => s.key === SPACE_KEY);
-
-  if (!found) {
-    console.error(`❌ SPACE NOT FOUND: No space with key '${SPACE_KEY}' found`);
-    console.error(`💡 SOLUTION: Check SPACE_KEY or create the space`);
-    console.error(`Available spaces:`, data.results.map(s => `${s.key}: ${s.name}`).join(', '));
-    throw new Error(`Space with key '${SPACE_KEY}' not found`);
-  }
-
-  _spaceId = found.id;
-  _parentId = found.homepageId;
-
-  console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId}`);
+  console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId} (resolved by key)`);
 }
 
 // ─── TABLE TEMPLATE ──────────────────────────────────────────────────
