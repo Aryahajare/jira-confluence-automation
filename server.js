@@ -10,12 +10,21 @@ const EMAIL      = process.env.EMAIL;
 const API_TOKEN  = process.env.API_TOKEN;
 const BASE_URL   = process.env.BASE_URL;
 const SPACE_KEY  = process.env.SPACE_KEY || "REL";
+const SPACE_ID   = process.env.SPACE_ID;
+const PARENT_ID  = process.env.PARENT_ID;
 
 ["EMAIL", "API_TOKEN", "BASE_URL"].forEach((k) => {
   if (!process.env[k]) {
     console.error(`❌ Missing env var: ${k}`);
     process.exit(1);
   }
+});
+
+console.log("🚀 Config:", {
+  BASE_URL,
+  SPACE_KEY,
+  SPACE_ID,
+  PARENT_ID,
 });
 
 // ─── AUTH ────────────────────────────────────────────────────────────
@@ -65,6 +74,42 @@ async function bootstrapSpace() {
 
   console.log("🚀 Bootstrapping space...");
 
+  if (SPACE_ID) {
+    _spaceId = SPACE_ID;
+  }
+
+  if (PARENT_ID) {
+    _parentId = PARENT_ID;
+  }
+
+  if (_spaceId && _parentId) {
+    console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId} (from env)`);
+    return;
+  }
+
+  if (_spaceId) {
+    try {
+      const spaceData = await api(
+        "GET SPACE",
+        v2,
+        "get",
+        `/spaces/${_spaceId}`,
+        null,
+        { expand: "homepage" }
+      );
+
+      _spaceId = spaceData.id || _spaceId;
+      _parentId = spaceData.homepageId || spaceData.homepage?.id;
+
+      if (_parentId) {
+        console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId} (from space info)`);
+        return;
+      }
+    } catch (err) {
+      console.warn("⚠️ Failed to fetch space by ID, falling back to key search");
+    }
+  }
+
   const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
 
   const found = data.results.find((s) => s.key === SPACE_KEY);
@@ -97,16 +142,24 @@ const createTableHTML = () => `
 `.trim();
 
 async function getFeedUrls(issueKey) {
-  console.log(`🔗 Fetching Web Links (Remote Links) for ${issueKey}`);
+  const key = String(issueKey || "").trim();
+  console.log(`🔗 Fetching Web Links (Remote Links) for ${key}`);
+
+  if (!key) {
+    console.warn("⚠️ No issue key provided for feed URL fetch");
+    return "N/A";
+  }
 
   try {
-    const res = await jira.get(`/issue/${issueKey}/remotelink`);
+    const res = await api("GET ISSUE LINKS", jira, "get", `/issue/${key}/remotelink`);
 
-    console.log("📦 Remote Links Response:", JSON.stringify(res.data, null, 2));
+    console.log("📦 Remote Links Response:", JSON.stringify(res, null, 2));
 
-    const feedLinks = res.data
-      .filter(link => link.object?.title === "Feed URL")
-      .map(link => link.object?.url)
+    const feedLinks = res
+      .filter((link) =>
+        String(link.object?.title || "").toLowerCase().includes("feed url")
+      )
+      .map((link) => link.object?.url)
       .filter(Boolean);
 
     console.log("✅ Extracted Feed URLs:", feedLinks);
