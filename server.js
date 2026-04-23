@@ -127,6 +127,32 @@ async function findPage(pageTitle) {
   }
 }
 
+async function loadSpaceByKey() {
+  try {
+    const spaceData = await api(
+      "LOAD SPACE BY KEY",
+      v1,
+      "get",
+      `/space/${SPACE_KEY}`,
+      null,
+      { expand: "homepage" }
+    );
+
+    console.log(`✅ Space loaded by key: ${spaceData.name} (${spaceData.id})`);
+    return spaceData;
+  } catch (err) {
+    if (err.response?.status === 403) {
+      console.warn(`⚠️ No permission to view space ${SPACE_KEY} directly by key`);
+      return null;
+    }
+    if (err.response?.status === 404) {
+      console.log(`⚠️ Space ${SPACE_KEY} not found by key`);
+      return null;
+    }
+    throw err;
+  }
+}
+
 async function createSpace() {
   console.log(`🆕 Creating Confluence space ${SPACE_KEY}`);
 
@@ -187,12 +213,16 @@ async function bootstrapSpace() {
 
   console.log(`⚠️ Resolving Confluence space by key ${SPACE_KEY}`);
 
-  let spaceData;
-  try {
-    const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
-    spaceData = data.results.find((s) => s.key === SPACE_KEY);
-  } catch (err) {
-    console.warn("⚠️ Unable to list spaces by key, attempting direct space creation if allowed");
+  let spaceData = await loadSpaceByKey();
+
+  if (!spaceData) {
+    console.warn("⚠️ Unable to load space by key directly; attempting list fallback");
+    try {
+      const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
+      spaceData = data.results.find((s) => s.key === SPACE_KEY);
+    } catch (err) {
+      console.warn("⚠️ Unable to list spaces by key, attempting direct space creation if allowed");
+    }
   }
 
   if (!spaceData) {
@@ -209,7 +239,7 @@ async function bootstrapSpace() {
   }
 
   _spaceId = spaceData.id;
-  _parentId = spaceData.homepageId;
+  _parentId = spaceData.homepageId || spaceData.homepage?.id;
 
   console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId} (resolved by key)`);
 }
