@@ -86,7 +86,7 @@ let _parentId = null;
 
 async function findPage(pageTitle) {
   try {
-    return await api(
+    const list = await api(
       "SEARCH PAGE",
       v2,
       "get",
@@ -94,10 +94,16 @@ async function findPage(pageTitle) {
       null,
       {
         spaceId: _spaceId,
-        title: pageTitle,
-        limit: 1,
+        limit: 100,
       }
     );
+
+    const exactMatches = list.results.filter((page) =>
+      String(page.title || "").trim() === String(pageTitle || "").trim()
+    );
+
+    console.log(`📄 Found ${list.results.length} pages in space; matched ${exactMatches.length} exact title(s)`);
+    return { results: exactMatches };
   } catch (err) {
     if (err.response?.status === 403) {
       console.warn("⚠️ Confluence v2 search 403 detected; falling back to REST v1 content search");
