@@ -9,6 +9,8 @@ const PORT       = process.env.PORT || 5000;
 const EMAIL      = process.env.EMAIL;
 const API_TOKEN  = process.env.API_TOKEN;
 const BASE_URL   = process.env.BASE_URL;
+const JIRA_BASE_URL = process.env.JIRA_BASE_URL || BASE_URL;
+const CONFLUENCE_BASE_URL = process.env.CONFLUENCE_BASE_URL || BASE_URL;
 const SPACE_KEY  = process.env.SPACE_KEY || "REL";
 const SPACE_ID   = process.env.SPACE_ID;
 const PARENT_ID  = process.env.PARENT_ID;
@@ -22,6 +24,8 @@ const PARENT_ID  = process.env.PARENT_ID;
 
 console.log("🚀 Config:", {
   BASE_URL,
+  JIRA_BASE_URL,
+  CONFLUENCE_BASE_URL,
   SPACE_KEY,
   SPACE_ID,
   PARENT_ID,
@@ -38,13 +42,13 @@ const hdrs = {
 
 // Confluence v2
 const v2 = axios.create({
-  baseURL: `${BASE_URL}/wiki/api/v2`,
+  baseURL: `${CONFLUENCE_BASE_URL}/wiki/api/v2`,
   headers: hdrs,
 });
 
 // Jira API
 const jira = axios.create({
-  baseURL: `${BASE_URL}/rest/api/3`,
+  baseURL: `${JIRA_BASE_URL}/rest/api/3`,
   headers: hdrs,
 });
 
@@ -87,28 +91,12 @@ async function bootstrapSpace() {
     return;
   }
 
-  if (_spaceId) {
-    try {
-      const spaceData = await api(
-        "GET SPACE",
-        v2,
-        "get",
-        `/spaces/${_spaceId}`,
-        null,
-        { expand: "homepage" }
-      );
-
-      _spaceId = spaceData.id || _spaceId;
-      _parentId = spaceData.homepageId || spaceData.homepage?.id;
-
-      if (_parentId) {
-        console.log(`✅ spaceId=${_spaceId}, parentId=${_parentId} (from space info)`);
-        return;
-      }
-    } catch (err) {
-      console.warn("⚠️ Failed to fetch space by ID, falling back to key search");
-    }
+  if (_spaceId && !_parentId) {
+    console.log(`⚠️ Using provided space ID ${_spaceId} without parentId; will create page at top-level if needed.`);
+    return;
   }
+
+  console.log(`⚠️ No SPACE_ID provided, resolving from SPACE_KEY ${SPACE_KEY}`);
 
   const data = await api("LIST SPACES", v2, "get", "/spaces", null, { limit: 50 });
 
@@ -248,16 +236,21 @@ app.post("/jira-webhook", async (req, res) => {
     if (search.results.length === 0) {
       console.log("🆕 Creating page...");
 
-      const created = await api("CREATE PAGE", v2, "post", "/pages", {
+      const createPayload = {
         spaceId: _spaceId,
-        parentId: _parentId,
         title: pageTitle,
         status: "current",
         body: {
           representation: "storage",
           value: createTableHTML(),
         },
-      });
+      };
+
+      if (_parentId) {
+        createPayload.parentId = _parentId;
+      }
+
+      const created = await api("CREATE PAGE", v2, "post", "/pages", createPayload);
 
       pageId = created.id;
       version = 1;
