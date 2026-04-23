@@ -32,17 +32,31 @@ const headers = {
   Authorization: authHeader,
   "Content-Type": "application/json",
   Accept: "application/json",
+  "User-Agent": "curl/7.88.1",
+  "Accept-Encoding": "gzip, deflate, br",
+  Connection: "keep-alive",
 };
 
 // ─── CLIENTS ─────────────────────────────────────────
 const confluence = axios.create({
   baseURL: `${BASE_URL}/wiki/api/v2`,
-  headers
+  headers,
+  decompress: true,
+  timeout: 10000,
 });
 
 const jira = axios.create({
   baseURL: `${BASE_URL}/rest/api/3`,
-  headers
+  headers,
+  decompress: true,
+  timeout: 10000,
+});
+
+confluence.interceptors.request.use((config) => {
+  console.log("\n🚀 FINAL REQUEST:");
+  console.log("URL:", `${config.baseURL}${config.url}`);
+  console.log("HEADERS:", JSON.stringify(config.headers, null, 2));
+  return config;
 });
 
 // ─── LOGGER ──────────────────────────────────────────
