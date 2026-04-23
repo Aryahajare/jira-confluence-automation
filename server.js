@@ -160,6 +160,45 @@ async function getFeedUrls(issueKey) {
   }
 }
 
+app.get("/diagnostics", async (req, res) => {
+  console.log("\n🔍 Diagnostics requested");
+
+  const result = {
+    jira: null,
+    confluence: null,
+    spaceId: SPACE_ID || null,
+    spaceKey: SPACE_KEY,
+  };
+
+  try {
+    const jiraSelf = await api("DIAG JIRA", jira, "get", "/myself");
+    result.jira = { ok: true, user: jiraSelf.displayName || jiraSelf.emailAddress || jiraSelf.accountId };
+  } catch (err) {
+    result.jira = {
+      ok: false,
+      error: err.response?.data || err.message,
+    };
+  }
+
+  try {
+    if (SPACE_ID) {
+      const spaceData = await api("DIAG CONFLUENCE SPACE", v2, "get", `/spaces/${SPACE_ID}`);
+      result.confluence = { ok: true, id: spaceData.id, name: spaceData.name || null };
+    } else {
+      const spacesData = await api("DIAG CONFLUENCE LIST", v2, "get", "/spaces", null, { limit: 1 });
+      result.confluence = { ok: true, count: Array.isArray(spacesData.results) ? spacesData.results.length : null };
+    }
+  } catch (err) {
+    result.confluence = {
+      ok: false,
+      error: err.response?.data || err.message,
+    };
+  }
+
+  const status = result.jira?.ok && result.confluence?.ok ? 200 : 502;
+  res.status(status).json(result);
+});
+
 // ─── WEBHOOK ─────────────────────────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK RECEIVED");
