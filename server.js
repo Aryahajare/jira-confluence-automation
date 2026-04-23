@@ -46,6 +46,12 @@ const v2 = axios.create({
   headers: hdrs,
 });
 
+// Confluence v1 fallback
+const v1 = axios.create({
+  baseURL: `${CONFLUENCE_BASE_URL}/wiki/rest/api`,
+  headers: hdrs,
+});
+
 // Jira API
 const jira = axios.create({
   baseURL: `${JIRA_BASE_URL}/rest/api/3`,
@@ -65,6 +71,11 @@ async function api(label, client, method, url, payload, params) {
     return res.data;
   } catch (err) {
     console.error(`❌ ERROR:`, err.response?.data || err.message);
+    console.error("   CONFIG:", {
+      baseURL: err.config?.baseURL,
+      url: err.config?.url,
+      method: err.config?.method,
+    });
     throw err;
   }
 }
@@ -72,6 +83,41 @@ async function api(label, client, method, url, payload, params) {
 // ─── BOOTSTRAP ───────────────────────────────────────────────────────
 let _spaceId = null;
 let _parentId = null;
+
+async function findPage(pageTitle) {
+  try {
+    return await api(
+      "SEARCH PAGE",
+      v2,
+      "get",
+      "/pages",
+      null,
+      {
+        spaceId: _spaceId,
+        title: pageTitle,
+        limit: 1,
+      }
+    );
+  } catch (err) {
+    if (err.response?.status === 403) {
+      console.warn("⚠️ Confluence v2 search 403 detected; falling back to REST v1 content search");
+      return await api(
+        "SEARCH PAGE V1",
+        v1,
+        "get",
+        "/content",
+        null,
+        {
+          spaceKey: SPACE_KEY,
+          title: pageTitle,
+          expand: "version,body.storage",
+          limit: 1,
+        }
+      );
+    }
+    throw err;
+  }
+}
 
 async function bootstrapSpace() {
   if (_spaceId && _parentId) return;
@@ -257,18 +303,7 @@ app.post("/jira-webhook", async (req, res) => {
     await bootstrapSpace();
 
     // ─── SEARCH PAGE ───────────────────────────────────────────────
-    const search = await api(
-      "SEARCH PAGE",
-      v2,
-      "get",
-      "/pages",
-      null,
-      {
-        spaceId: _spaceId,
-        title: pageTitle,
-        limit: 1,
-      }
-    );
+    const search = await findPage(pageTitle);
 
     let pageId, currentBody, version;
 
