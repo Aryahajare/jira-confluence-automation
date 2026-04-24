@@ -84,8 +84,8 @@ const createTable = () => `
 <th>CI Link</th>
 <th>PID</th>
 <th>Description</th>
-<th>Reporter</th>
-<th>Assignee</th>
+<th>DEV Contact</th>
+<th>CI Contact</th>
 <th>Feed URL</th>
 <th>Deployment Date</th>
 </tr>
@@ -93,7 +93,7 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URLS (FIXED) ─────────────────────
+// ─── FETCH FEED URLS (UPDATED SPACING) ───────────
 async function getFeedUrls(issueKey) {
   try {
     const res = await api("GET REMOTE LINKS", {
@@ -111,7 +111,9 @@ async function getFeedUrls(issueKey) {
 
     console.log("✅ EXTRACTED URLS:", urls);
 
-    return urls.length ? urls.join("<br/>") : "N/A";
+    // ✅ Added spacing between URLs
+    return urls.length ? urls.join("<br/><br/>") : "N/A";
+
   } catch (err) {
     console.error("❌ FEED URL FETCH FAILED");
     return "N/A";
