@@ -10,7 +10,7 @@ const EMAIL = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
 
-const SPACE_ID = "327691"; // ✅ ONLY TRUST THIS
+const SPACE_ID = "327691"; // ✅ TRUST THIS
 
 // ─── AUTH ────────────────────────────────────────
 const authHeader =
@@ -20,12 +20,18 @@ const headers = {
   Authorization: authHeader,
   Accept: "application/json",
   "Content-Type": "application/json",
-  "User-Agent": "curl/7.88.1",
+  "User-Agent": "jira-confluence-bot/1.0",
 };
 
-// ─── AXIOS CLIENT ────────────────────────────────
+// ─── AXIOS CLIENTS ───────────────────────────────
 const confluence = axios.create({
   baseURL: `${BASE_URL}/wiki/rest/api`,
+  headers,
+  timeout: 15000,
+});
+
+const jira = axios.create({
+  baseURL: `${BASE_URL}/rest/api/3`,
   headers,
   timeout: 15000,
 });
@@ -37,7 +43,7 @@ async function api(label, config) {
   console.log(`\n════════ ${label} ════════`);
   console.log("➡️ METHOD:", config.method.toUpperCase());
   console.log("➡️ URL:", config.baseURL + config.url);
-  console.log("➡️ PARAMS:", config.params);
+  console.log("➡️ PARAMS:", config.params || {});
   console.log("➡️ HEADERS:", config.headers);
 
   try {
@@ -57,14 +63,13 @@ async function api(label, config) {
     console.error("❌ ERROR HEADERS:", err.response?.headers);
 
     if (typeof err.response?.data === "string") {
-      console.error("❌ RAW HTML ERROR (CloudFront likely):");
+      console.error("❌ RAW HTML ERROR:");
       console.error(err.response.data.substring(0, 500));
     } else {
       console.error("❌ JSON ERROR:", err.response?.data);
     }
 
     console.error("⏱️ FAILED AFTER:", Date.now() - start, "ms");
-
     throw err;
   }
 }
@@ -74,7 +79,7 @@ const createTable = () => `
 <table>
 <tbody>
 <tr>
-<th>SB</th>
+<th>SB/Acquia</th>
 <th>Stage Only</th>
 <th>CI Link</th>
 <th>PID</th>
@@ -88,6 +93,31 @@ const createTable = () => `
 </table>
 `.trim();
 
+// ─── FETCH FEED URLS (FIXED) ─────────────────────
+async function getFeedUrls(issueKey) {
+  try {
+    const res = await api("GET REMOTE LINKS", {
+      method: "get",
+      baseURL: `${BASE_URL}/rest/api/3`,
+      url: `/issue/${issueKey}/remotelink`,
+      headers,
+    });
+
+    console.log("🔍 RAW LINKS:", JSON.stringify(res, null, 2));
+
+    const urls = res
+      .map((l) => l.object?.url)
+      .filter(Boolean);
+
+    console.log("✅ EXTRACTED URLS:", urls);
+
+    return urls.length ? urls.join("<br/>") : "N/A";
+  } catch (err) {
+    console.error("❌ FEED URL FETCH FAILED");
+    return "N/A";
+  }
+}
+
 // ─── WEBHOOK ─────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK HIT");
@@ -98,7 +128,25 @@ app.post("/jira-webhook", async (req, res) => {
 
     const pageTitle = `${data.fixVersion} - CMS Release`;
 
-    // ─── FETCH ALL PAGES (ONLY WORKING METHOD) ───
+    // ✅ SB extraction
+    const sbMatch = data.title.match(/\[(.*?)\]/);
+    const sb = sbMatch ? sbMatch[1] : "";
+
+    // ✅ PID extraction
+    const pid = data.portfolioEpic
+      ? data.portfolioEpic.split(":")[0].trim()
+      : "";
+
+    // ✅ Feed URLs
+    const feedURL = await getFeedUrls(data.ticketId);
+
+    console.log("📊 FINAL PROCESSED:", {
+      sb,
+      pid,
+      feedURL,
+    });
+
+    // ─── FETCH PAGES ─────────────────────────────
     const search = await api("FETCH ALL PAGES", {
       method: "get",
       baseURL: `${BASE_URL}/wiki/rest/api`,
@@ -113,12 +161,6 @@ app.post("/jira-webhook", async (req, res) => {
 
     console.log("📄 TOTAL PAGES:", search.results.length);
 
-    // 🔍 DEBUG: print titles
-    search.results.forEach((p, i) => {
-      console.log(`📄 [${i}]`, p.title);
-    });
-
-    // ─── FIND MATCH ──────────────────────────────
     const page = search.results.find(
       (p) => p.title.trim() === pageTitle.trim()
     );
@@ -151,7 +193,6 @@ app.post("/jira-webhook", async (req, res) => {
       body = createTable();
     } else {
       console.log("📄 PAGE FOUND:", page.id);
-
       pageId = page.id;
       version = page.version.number;
       body = page.body.storage.value;
@@ -160,14 +201,14 @@ app.post("/jira-webhook", async (req, res) => {
     // ─── APPEND ROW ─────────────────────────────
     const row = `
 <tr>
-<td>${data.ticketId}</td>
+<td>${sb}</td>
 <td>${data.stageOnly}</td>
 <td><a href="${data.jiraLink}">${data.ticketId}</a></td>
-<td>${data.portfolioEpic}</td>
+<td>${pid}</td>
 <td>${data.title}</td>
 <td>${data.reporter}</td>
 <td>${data.assignee}</td>
-<td>N/A</td>
+<td>${feedURL}</td>
 <td>${data.stageDeploymentDate}</td>
 </tr>`;
 
