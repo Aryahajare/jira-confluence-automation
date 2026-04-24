@@ -10,12 +10,7 @@ const EMAIL = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
 
-const SPACE_KEY = "REL"; // ✅ HARD CODED
-
-if (!EMAIL || !API_TOKEN || !BASE_URL) {
-  console.error("❌ Missing ENV variables");
-  process.exit(1);
-}
+const SPACE_ID = "327691"; // ✅ ONLY TRUST THIS
 
 // ─── AUTH ────────────────────────────────────────
 const authHeader =
@@ -28,36 +23,48 @@ const headers = {
   "User-Agent": "curl/7.88.1",
 };
 
-// ─── AXIOS CLIENTS ───────────────────────────────
+// ─── AXIOS CLIENT ────────────────────────────────
 const confluence = axios.create({
   baseURL: `${BASE_URL}/wiki/rest/api`,
   headers,
+  timeout: 15000,
 });
 
-const jira = axios.create({
-  baseURL: `${BASE_URL}/rest/api/3`,
-  headers,
-});
+// ─── ADVANCED LOGGER ─────────────────────────────
+async function api(label, config) {
+  const start = Date.now();
 
-// ─── LOGGER ──────────────────────────────────────
-async function api(label, client, method, url, payload, params) {
-  console.log(`\n──────── ${label} ────────`);
-  console.log(`${method.toUpperCase()} ${url}`);
-  if (params) console.log("PARAMS:", params);
-  if (payload) console.log("PAYLOAD:", JSON.stringify(payload, null, 2));
+  console.log(`\n════════ ${label} ════════`);
+  console.log("➡️ METHOD:", config.method.toUpperCase());
+  console.log("➡️ URL:", config.baseURL + config.url);
+  console.log("➡️ PARAMS:", config.params);
+  console.log("➡️ HEADERS:", config.headers);
 
   try {
-    const res = await client.request({
-      method,
-      url,
-      data: payload,
-      params,
-    });
+    const res = await axios(config);
 
     console.log("✅ STATUS:", res.status);
+    console.log("⏱️ TIME:", Date.now() - start, "ms");
+
+    console.log("📦 RESPONSE META:", {
+      size: JSON.stringify(res.data).length,
+      keys: Object.keys(res.data),
+    });
+
     return res.data;
   } catch (err) {
-    console.error("❌ ERROR:", err.response?.data || err.message);
+    console.error("❌ ERROR STATUS:", err.response?.status);
+    console.error("❌ ERROR HEADERS:", err.response?.headers);
+
+    if (typeof err.response?.data === "string") {
+      console.error("❌ RAW HTML ERROR (CloudFront likely):");
+      console.error(err.response.data.substring(0, 500));
+    } else {
+      console.error("❌ JSON ERROR:", err.response?.data);
+    }
+
+    console.error("⏱️ FAILED AFTER:", Date.now() - start, "ms");
+
     throw err;
   }
 }
@@ -81,32 +88,6 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URL FROM WEB LINKS ───────────────
-async function getFeedUrls(issueKey) {
-  try {
-    const res = await api(
-      "GET REMOTE LINKS",
-      jira,
-      "get",
-      `/issue/${issueKey}/remotelink`
-    );
-
-    const urls = res
-      .filter((l) =>
-        l.object?.title?.toLowerCase().includes("feed url")
-      )
-      .map((l) => l.object?.url)
-      .filter(Boolean);
-
-    console.log("✅ Feed URLs:", urls);
-
-    return urls.join("<br/>") || "N/A";
-  } catch (err) {
-    console.error("❌ Feed URL fetch failed");
-    return "N/A";
-  }
-}
-
 // ─── WEBHOOK ─────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK HIT");
@@ -115,85 +96,62 @@ app.post("/jira-webhook", async (req, res) => {
   try {
     const data = req.body;
 
-    const {
-      ticketId,
-      title,
-      reporter,
-      assignee,
-      jiraLink,
-      fixVersion,
-      portfolioEpic,
-      stageOnly,
-      stageDeploymentDate,
-    } = data;
+    const pageTitle = `${data.fixVersion} - CMS Release`;
 
-    if (!fixVersion) {
-      return res.send("No fixVersion");
-    }
-
-    const pageTitle = `${fixVersion} - CMS Release`;
-
-    const pid = portfolioEpic
-      ? portfolioEpic.split(":")[0].trim()
-      : "";
-
-    const sbMatch = title.match(/\[(.*?)\]/);
-    const sb = sbMatch ? sbMatch[1] : "";
-
-    const feedURL = await getFeedUrls(ticketId);
-
-    console.log("📊 Processed:", {
-      pageTitle,
-      pid,
-      sb,
-      feedURL,
+    // ─── FETCH ALL PAGES (ONLY WORKING METHOD) ───
+    const search = await api("FETCH ALL PAGES", {
+      method: "get",
+      baseURL: `${BASE_URL}/wiki/rest/api`,
+      url: "/content",
+      headers,
+      params: {
+        spaceId: SPACE_ID,
+        limit: 100,
+        expand: "version,body.storage",
+      },
     });
 
-    // ─── SEARCH PAGE ─────────────────────────────
-    const search = await api(
-      "SEARCH PAGE",
-      confluence,
-      "get",
-      "/content",
-      null,
-      {
-        spaceKey: SPACE_KEY,
-        title: pageTitle,
-        expand: "version,body.storage",
-        limit: 1,
-      }
+    console.log("📄 TOTAL PAGES:", search.results.length);
+
+    // 🔍 DEBUG: print titles
+    search.results.forEach((p, i) => {
+      console.log(`📄 [${i}]`, p.title);
+    });
+
+    // ─── FIND MATCH ──────────────────────────────
+    const page = search.results.find(
+      (p) => p.title.trim() === pageTitle.trim()
     );
 
     let pageId, version, body;
 
-    if (search.results.length === 0) {
-      console.log("🆕 Creating page...");
+    if (!page) {
+      console.log("🆕 PAGE NOT FOUND → CREATING");
 
-      const created = await api(
-        "CREATE PAGE",
-        confluence,
-        "post",
-        "/content",
-        {
+      const created = await api("CREATE PAGE", {
+        method: "post",
+        baseURL: `${BASE_URL}/wiki/rest/api`,
+        url: "/content",
+        headers,
+        data: {
           type: "page",
           title: pageTitle,
-          space: { key: SPACE_KEY },
+          space: { key: "REL" },
           body: {
             storage: {
               value: createTable(),
               representation: "storage",
             },
           },
-        }
-      );
+        },
+      });
 
       pageId = created.id;
       version = 1;
       body = createTable();
     } else {
-      console.log("📄 Page exists");
+      console.log("📄 PAGE FOUND:", page.id);
 
-      const page = search.results[0];
       pageId = page.id;
       version = page.version.number;
       body = page.body.storage.value;
@@ -202,39 +160,44 @@ app.post("/jira-webhook", async (req, res) => {
     // ─── APPEND ROW ─────────────────────────────
     const row = `
 <tr>
-<td>${sb}</td>
-<td>${stageOnly}</td>
-<td><a href="${jiraLink}">${ticketId}</a></td>
-<td>${pid}</td>
-<td>${title}</td>
-<td>${reporter}</td>
-<td>${assignee}</td>
-<td>${feedURL}</td>
-<td>${stageDeploymentDate}</td>
-</tr>
-`;
+<td>${data.ticketId}</td>
+<td>${data.stageOnly}</td>
+<td><a href="${data.jiraLink}">${data.ticketId}</a></td>
+<td>${data.portfolioEpic}</td>
+<td>${data.title}</td>
+<td>${data.reporter}</td>
+<td>${data.assignee}</td>
+<td>N/A</td>
+<td>${data.stageDeploymentDate}</td>
+</tr>`;
 
     const updatedBody = body.replace("</tbody>", `${row}</tbody>`);
 
     // ─── UPDATE PAGE ────────────────────────────
-    await api("UPDATE PAGE", confluence, "put", `/content/${pageId}`, {
-      id: pageId,
-      type: "page",
-      title: pageTitle,
-      version: { number: version + 1 },
-      body: {
-        storage: {
-          value: updatedBody,
-          representation: "storage",
+    await api("UPDATE PAGE", {
+      method: "put",
+      baseURL: `${BASE_URL}/wiki/rest/api`,
+      url: `/content/${pageId}`,
+      headers,
+      data: {
+        id: pageId,
+        type: "page",
+        title: pageTitle,
+        version: { number: version + 1 },
+        body: {
+          storage: {
+            value: updatedBody,
+            representation: "storage",
+          },
         },
       },
     });
 
-    console.log("🎉 SUCCESS");
+    console.log("🎉 SUCCESS FLOW COMPLETE");
     res.send("Done");
 
   } catch (err) {
-    console.error("❌ WEBHOOK FAILED");
+    console.error("❌ WEBHOOK FAILED HARD");
     res.status(500).send("Error");
   }
 });
