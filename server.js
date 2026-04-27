@@ -93,7 +93,7 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URLS (RAW URL + ICON) ────────────
+// ─── FETCH FEED URLS (INLINE SMART LINK FIX) ────────────
 async function getFeedUrls(issueKey) {
   try {
     const res = await api("GET REMOTE LINKS", {
@@ -122,13 +122,8 @@ async function getFeedUrls(issueKey) {
 
     if (!urls.length) return "N/A";
 
-    // ✅ RAW URL DISPLAY + ICON + TOOLTIP
-    return urls
-      .map(
-        (url) =>
-          `<a href="${url}" title="Open Feed URL">🌐 ${url}</a>`
-      )
-      .join("<br/><br/>");
+    // ✅ RETURN RAW URLS (IMPORTANT FOR INLINE)
+    return urls.join("<br/><br/>");
 
   } catch (err) {
     console.error("❌ FEED URL FETCH FAILED");
