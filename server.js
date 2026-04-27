@@ -93,7 +93,7 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URLS (INLINE SMART LINK FIX) ────────────
+// ─── FETCH FEED URLS (STRICT RAW MODE) ───────────
 async function getFeedUrls(issueKey) {
   try {
     const res = await api("GET REMOTE LINKS", {
@@ -120,10 +120,8 @@ async function getFeedUrls(issueKey) {
 
     console.log("✅ FILTERED FEED URLS:", urls);
 
-    if (!urls.length) return "N/A";
-
-    // ✅ RETURN RAW URLS (IMPORTANT FOR INLINE)
-    return urls.join("<br/><br/>");
+    // ✅ RETURN RAW URLS ONLY
+    return urls.length ? urls.join("<br/>") : "N/A";
 
   } catch (err) {
     console.error("❌ FEED URL FETCH FAILED");
@@ -211,8 +209,8 @@ app.post("/jira-webhook", async (req, res) => {
       body = page.body.storage.value;
     }
 
-    // ✅ CI LINK → RAW URL + ICON + TOOLTIP
-    const ciLink = `<a href="${data.jiraLink}" title="Open Jira Ticket">🔗 ${data.jiraLink}</a>`;
+    // ✅ CI LINK → RAW URL ONLY
+    const ciLink = data.jiraLink;
 
     // ─── APPEND ROW ─────────────────────────────
     const row = `
