@@ -93,7 +93,7 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URLS WITH ICON + TOOLTIP ─────────
+// ─── FETCH FEED URLS (RAW URL + ICON) ────────────
 async function getFeedUrls(issueKey) {
   try {
     const res = await api("GET REMOTE LINKS", {
@@ -113,13 +113,6 @@ async function getFeedUrls(issueKey) {
         const isFeed =
           l.object?.title?.toLowerCase().includes("feed");
 
-        console.log("🔎 CHECK LINK:", {
-          url: l.object?.url,
-          title: l.object?.title,
-          isConfluence,
-          isFeed,
-        });
-
         return !isConfluence && isFeed;
       })
       .map((l) => l.object?.url)
@@ -129,16 +122,12 @@ async function getFeedUrls(issueKey) {
 
     if (!urls.length) return "N/A";
 
-    // ✅ Fancy formatted links
+    // ✅ RAW URL DISPLAY + ICON + TOOLTIP
     return urls
-      .map((url, i) => {
-        let domain = "Open Link";
-        try {
-          domain = new URL(url).hostname;
-        } catch {}
-
-        return `<a href="${url}" title="Open Feed: ${domain}">🌐 Feed ${i + 1}</a>`;
-      })
+      .map(
+        (url) =>
+          `<a href="${url}" title="Open Feed URL">🌐 ${url}</a>`
+      )
       .join("<br/><br/>");
 
   } catch (err) {
@@ -227,8 +216,8 @@ app.post("/jira-webhook", async (req, res) => {
       body = page.body.storage.value;
     }
 
-    // ✅ Fancy CI Link with icon + tooltip
-    const ciLink = `<a href="${data.jiraLink}" title="Open Jira Ticket ${data.ticketId}">🔗 ${data.ticketId}</a>`;
+    // ✅ CI LINK → RAW URL + ICON + TOOLTIP
+    const ciLink = `<a href="${data.jiraLink}" title="Open Jira Ticket">🔗 ${data.jiraLink}</a>`;
 
     // ─── APPEND ROW ─────────────────────────────
     const row = `
