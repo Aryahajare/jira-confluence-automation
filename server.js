@@ -106,14 +106,29 @@ async function getFeedUrls(issueKey) {
     console.log("🔍 RAW LINKS:", JSON.stringify(res, null, 2));
 
     const urls = res
+      .filter((l) => {
+        const isConfluence =
+          l.application?.type === "com.atlassian.confluence";
+
+        const isFeed =
+          l.object?.title?.toLowerCase().includes("feed");
+
+        console.log("🔎 CHECK LINK:", {
+          url: l.object?.url,
+          title: l.object?.title,
+          isConfluence,
+          isFeed,
+        });
+
+        // ✅ Only allow NON-confluence OR explicitly feed links
+        return !isConfluence && isFeed;
+      })
       .map((l) => l.object?.url)
       .filter(Boolean);
 
-    console.log("✅ EXTRACTED URLS:", urls);
+    console.log("✅ FILTERED FEED URLS:", urls);
 
-    // ✅ Added spacing between URLs
     return urls.length ? urls.join("<br/><br/>") : "N/A";
-
   } catch (err) {
     console.error("❌ FEED URL FETCH FAILED");
     return "N/A";
