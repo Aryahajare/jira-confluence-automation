@@ -1,5 +1,6 @@
 import express from "express";
 import axios from "axios";
+import * as cheerio from "cheerio";
 
 const app = express();
 app.use(express.json());
@@ -10,7 +11,7 @@ const EMAIL = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
 
-const SPACE_ID = "327691"; // ✅ TRUST THIS
+const SPACE_ID = "327691";
 
 // ─── AUTH ────────────────────────────────────────
 const authHeader =
@@ -36,40 +37,19 @@ const jira = axios.create({
   timeout: 15000,
 });
 
-// ─── ADVANCED LOGGER ─────────────────────────────
+// ─── LOGGER ──────────────────────────────────────
 async function api(label, config) {
   const start = Date.now();
 
   console.log(`\n════════ ${label} ════════`);
-  console.log("➡️ METHOD:", config.method.toUpperCase());
-  console.log("➡️ URL:", config.baseURL + config.url);
-  console.log("➡️ PARAMS:", config.params || {});
-  console.log("➡️ HEADERS:", config.headers);
+  console.log("➡️", config.method.toUpperCase(), config.baseURL + config.url);
 
   try {
     const res = await axios(config);
-
-    console.log("✅ STATUS:", res.status);
-    console.log("⏱️ TIME:", Date.now() - start, "ms");
-
-    console.log("📦 RESPONSE META:", {
-      size: JSON.stringify(res.data).length,
-      keys: Object.keys(res.data),
-    });
-
+    console.log("✅ STATUS:", res.status, "| ⏱️", Date.now() - start, "ms");
     return res.data;
   } catch (err) {
-    console.error("❌ ERROR STATUS:", err.response?.status);
-    console.error("❌ ERROR HEADERS:", err.response?.headers);
-
-    if (typeof err.response?.data === "string") {
-      console.error("❌ RAW HTML ERROR:");
-      console.error(err.response.data.substring(0, 500));
-    } else {
-      console.error("❌ JSON ERROR:", err.response?.data);
-    }
-
-    console.error("⏱️ FAILED AFTER:", Date.now() - start, "ms");
+    console.error("❌ ERROR:", err.response?.status);
     throw err;
   }
 }
@@ -93,7 +73,7 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URLS (STRICT RAW MODE) ───────────
+// ─── FETCH FEED URLS ─────────────────────────────
 async function getFeedUrls(issueKey) {
   try {
     const res = await api("GET REMOTE LINKS", {
@@ -102,8 +82,6 @@ async function getFeedUrls(issueKey) {
       url: `/issue/${issueKey}/remotelink`,
       headers,
     });
-
-    console.log("🔍 RAW LINKS:", JSON.stringify(res, null, 2));
 
     const urls = res
       .filter((l) => {
@@ -118,10 +96,12 @@ async function getFeedUrls(issueKey) {
       .map((l) => l.object?.url)
       .filter(Boolean);
 
-    console.log("✅ FILTERED FEED URLS:", urls);
+    if (!urls.length) return "N/A";
 
-    // ✅ RETURN RAW URLS ONLY
-    return urls.length ? urls.join("<br/>") : "N/A";
+    // ✅ Each URL as clickable link + new line
+    return urls
+      .map((url) => `<a href="${url}">${url}</a>`)
+      .join("<br/>");
 
   } catch (err) {
     console.error("❌ FEED URL FETCH FAILED");
@@ -132,33 +112,25 @@ async function getFeedUrls(issueKey) {
 // ─── WEBHOOK ─────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK HIT");
-  console.log("📦 Payload:", JSON.stringify(req.body, null, 2));
 
   try {
     const data = req.body;
 
     const pageTitle = `${data.fixVersion} - CMS Release`;
 
-    // ✅ SB extraction
+    // SB extraction
     const sbMatch = data.title.match(/\[(.*?)\]/);
     const sb = sbMatch ? sbMatch[1] : "";
 
-    // ✅ PID extraction
+    // PID extraction
     const pid = data.portfolioEpic
       ? data.portfolioEpic.split(":")[0].trim()
       : "";
 
-    // ✅ Feed URLs
     const feedURL = await getFeedUrls(data.ticketId);
 
-    console.log("📊 FINAL PROCESSED:", {
-      sb,
-      pid,
-      feedURL,
-    });
-
-    // ─── FETCH PAGES ─────────────────────────────
-    const search = await api("FETCH ALL PAGES", {
+    // ─── FETCH PAGE ─────────────────────────────
+    const search = await api("FETCH PAGES", {
       method: "get",
       baseURL: `${BASE_URL}/wiki/rest/api`,
       url: "/content",
@@ -170,8 +142,6 @@ app.post("/jira-webhook", async (req, res) => {
       },
     });
 
-    console.log("📄 TOTAL PAGES:", search.results.length);
-
     const page = search.results.find(
       (p) => p.title.trim() === pageTitle.trim()
     );
@@ -179,7 +149,7 @@ app.post("/jira-webhook", async (req, res) => {
     let pageId, version, body;
 
     if (!page) {
-      console.log("🆕 PAGE NOT FOUND → CREATING");
+      console.log("🆕 CREATING PAGE");
 
       const created = await api("CREATE PAGE", {
         method: "post",
@@ -203,30 +173,48 @@ app.post("/jira-webhook", async (req, res) => {
       version = 1;
       body = createTable();
     } else {
-      console.log("📄 PAGE FOUND:", page.id);
       pageId = page.id;
       version = page.version.number;
       body = page.body.storage.value;
     }
 
-    // ✅ CI LINK → RAW URL ONLY
-    const ciLink = data.jiraLink;
+    // ─── CHEERIO PARSE ──────────────────────────
+    const $ = cheerio.load(body);
 
-    // ─── APPEND ROW ─────────────────────────────
-    const row = `
+    const ciLinkHTML = `<a href="${data.jiraLink}">${data.jiraLink}</a>`;
+
+    const newRow = `
 <tr>
 <td>${sb}</td>
 <td>${data.stageOnly}</td>
-<td>${ciLink}</td>
+<td>${ciLinkHTML}</td>
 <td>${pid}</td>
 <td>${data.title}</td>
 <td>${data.reporter}</td>
 <td>${data.assignee}</td>
 <td>${feedURL}</td>
 <td>${data.stageDeploymentDate}</td>
-</tr>`;
+</tr>
+`;
 
-    const updatedBody = body.replace("</tbody>", `${row}</tbody>`);
+    let updated = false;
+
+    $("tbody tr").each((i, el) => {
+      const rowText = $(el).text();
+
+      if (rowText.includes(data.ticketId)) {
+        console.log("♻️ UPDATING EXISTING ROW");
+        $(el).replaceWith(newRow);
+        updated = true;
+      }
+    });
+
+    if (!updated) {
+      console.log("🆕 ADDING NEW ROW");
+      $("tbody").append(newRow);
+    }
+
+    const updatedBody = $.html();
 
     // ─── UPDATE PAGE ────────────────────────────
     await api("UPDATE PAGE", {
@@ -248,11 +236,11 @@ app.post("/jira-webhook", async (req, res) => {
       },
     });
 
-    console.log("🎉 SUCCESS FLOW COMPLETE");
+    console.log("🎉 SUCCESS");
     res.send("Done");
 
   } catch (err) {
-    console.error("❌ WEBHOOK FAILED HARD");
+    console.error("❌ WEBHOOK FAILED");
     res.status(500).send("Error");
   }
 });
