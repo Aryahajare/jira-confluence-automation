@@ -93,7 +93,7 @@ const createTable = () => `
 </table>
 `.trim();
 
-// ─── FETCH FEED URLS (UPDATED SPACING) ───────────
+// ─── FETCH FEED URLS WITH ICON + TOOLTIP ─────────
 async function getFeedUrls(issueKey) {
   try {
     const res = await api("GET REMOTE LINKS", {
@@ -120,7 +120,6 @@ async function getFeedUrls(issueKey) {
           isFeed,
         });
 
-        // ✅ Only allow NON-confluence OR explicitly feed links
         return !isConfluence && isFeed;
       })
       .map((l) => l.object?.url)
@@ -128,7 +127,20 @@ async function getFeedUrls(issueKey) {
 
     console.log("✅ FILTERED FEED URLS:", urls);
 
-    return urls.length ? urls.join("<br/><br/>") : "N/A";
+    if (!urls.length) return "N/A";
+
+    // ✅ Fancy formatted links
+    return urls
+      .map((url, i) => {
+        let domain = "Open Link";
+        try {
+          domain = new URL(url).hostname;
+        } catch {}
+
+        return `<a href="${url}" title="Open Feed: ${domain}">🌐 Feed ${i + 1}</a>`;
+      })
+      .join("<br/><br/>");
+
   } catch (err) {
     console.error("❌ FEED URL FETCH FAILED");
     return "N/A";
@@ -215,12 +227,15 @@ app.post("/jira-webhook", async (req, res) => {
       body = page.body.storage.value;
     }
 
+    // ✅ Fancy CI Link with icon + tooltip
+    const ciLink = `<a href="${data.jiraLink}" title="Open Jira Ticket ${data.ticketId}">🔗 ${data.ticketId}</a>`;
+
     // ─── APPEND ROW ─────────────────────────────
     const row = `
 <tr>
 <td>${sb}</td>
 <td>${data.stageOnly}</td>
-<td><a href="${data.jiraLink}">${data.ticketId}</a></td>
+<td>${ciLink}</td>
 <td>${pid}</td>
 <td>${data.title}</td>
 <td>${data.reporter}</td>
