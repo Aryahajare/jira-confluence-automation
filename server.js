@@ -68,6 +68,8 @@ const createTable = () => `
 <th>CI Contact</th>
 <th>Feed URL</th>
 <th>Deployment Date</th>
+<th>CMS Release name</th>
+<th>Validation Status</th>
 </tr>
 </tbody>
 </table>
@@ -194,6 +196,8 @@ app.post("/jira-webhook", async (req, res) => {
 <td>${data.assignee}</td>
 <td>${feedURL}</td>
 <td>${data.stageDeploymentDate}</td>
+  <td></td>
+  <td></td>
 </tr>
 `;
 
