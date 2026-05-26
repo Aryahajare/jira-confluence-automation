@@ -10,6 +10,8 @@ const PORT = process.env.PORT || 5000;
 const EMAIL = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
+// normalize base url to avoid double slashes when concatenating paths
+const BASE = (BASE_URL || "").replace(/\/+$/, "");
 
 const SPACE_KEY = process.env.SPACE_KEY || "IE";
 const PARENT_TITLE = process.env.PARENT_TITLE || "UF - CMS Release Scope";
@@ -27,13 +29,13 @@ const headers = {
 
 // ─── AXIOS CLIENTS ───────────────────────────────
 const confluence = axios.create({
-  baseURL: `${BASE_URL}/wiki/rest/api`,
+  baseURL: `${BASE}/wiki/rest/api`,
   headers,
   timeout: 15000,
 });
 
 const jira = axios.create({
-  baseURL: `${BASE_URL}/rest/api/3`,
+  baseURL: `${BASE}/rest/api/3`,
   headers,
   timeout: 15000,
 });
@@ -79,9 +81,13 @@ const createTable = () => `
 // ─── FETCH FEED URLS ─────────────────────────────
 async function getFeedUrls(issueKey) {
   try {
+    if (!issueKey) {
+      console.warn('getFeedUrls: no issueKey provided, skipping remote link lookup');
+      return "N/A";
+    }
     const res = await api("GET REMOTE LINKS", {
       method: "get",
-      baseURL: `${BASE_URL}/rest/api/3`,
+      baseURL: `${BASE}/rest/api/3`,
       url: `/issue/${issueKey}/remotelink`,
       headers,
     });
@@ -130,13 +136,15 @@ app.post("/jira-webhook", async (req, res) => {
       ? data.portfolioEpic.split(":")[0].trim()
       : "";
 
+    console.log('Webhook payload stageOnly:', JSON.stringify(data.stageOnly));
+    if (!data.ticketId) console.warn('Webhook payload missing ticketId:', JSON.stringify(data));
     const feedURL = await getFeedUrls(data.ticketId);
 
     // ─── FETCH PAGE / FIND PARENT ─────────────────────────────
     // Find the parent page by title in the configured space key
     const parentSearch = await api("FIND PARENT", {
       method: "get",
-      baseURL: `${BASE_URL}/wiki/rest/api`,
+      baseURL: `${BASE}/wiki/rest/api`,
       url: "/content",
       headers,
       params: {
@@ -155,7 +163,7 @@ app.post("/jira-webhook", async (req, res) => {
     if (parentId) {
       const children = await api("FETCH CHILD PAGES", {
         method: "get",
-        baseURL: `${BASE_URL}/wiki/rest/api`,
+        baseURL: `${BASE}/wiki/rest/api`,
         url: `/content/${parentId}/child/page`,
         headers,
         params: {
@@ -171,7 +179,7 @@ app.post("/jira-webhook", async (req, res) => {
     if (!page) {
       const search = await api("FETCH PAGES", {
         method: "get",
-        baseURL: `${BASE_URL}/wiki/rest/api`,
+        baseURL: `${BASE}/wiki/rest/api`,
         url: "/content",
         headers,
         params: {
@@ -205,7 +213,7 @@ app.post("/jira-webhook", async (req, res) => {
 
       const created = await api("CREATE PAGE", {
         method: "post",
-        baseURL: `${BASE_URL}/wiki/rest/api`,
+        baseURL: `${BASE}/wiki/rest/api`,
         url: "/content",
         headers,
         data: createData,
@@ -263,7 +271,7 @@ app.post("/jira-webhook", async (req, res) => {
     // ─── UPDATE PAGE ────────────────────────────
     await api("UPDATE PAGE", {
       method: "put",
-      baseURL: `${BASE_URL}/wiki/rest/api`,
+      baseURL: `${BASE}/wiki/rest/api`,
       url: `/content/${pageId}`,
       headers,
       data: {
