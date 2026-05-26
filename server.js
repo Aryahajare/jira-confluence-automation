@@ -11,7 +11,8 @@ const EMAIL = process.env.EMAIL;
 const API_TOKEN = process.env.API_TOKEN;
 const BASE_URL = process.env.BASE_URL;
 
-const SPACE_ID = "327691";
+const SPACE_KEY = process.env.SPACE_KEY || "IE";
+const PARENT_TITLE = process.env.PARENT_TITLE || "UF - CMS Release Scope";
 
 // ─── AUTH ────────────────────────────────────────
 const authHeader =
@@ -131,44 +132,83 @@ app.post("/jira-webhook", async (req, res) => {
 
     const feedURL = await getFeedUrls(data.ticketId);
 
-    // ─── FETCH PAGE ─────────────────────────────
-    const search = await api("FETCH PAGES", {
+    // ─── FETCH PAGE / FIND PARENT ─────────────────────────────
+    // Find the parent page by title in the configured space key
+    const parentSearch = await api("FIND PARENT", {
       method: "get",
       baseURL: `${BASE_URL}/wiki/rest/api`,
       url: "/content",
       headers,
       params: {
-        spaceId: SPACE_ID,
-        limit: 100,
-        expand: "version,body.storage",
+        spaceKey: SPACE_KEY,
+        title: PARENT_TITLE,
+        expand: "version",
       },
     });
 
-    const page = search.results.find(
-      (p) => p.title.trim() === pageTitle.trim()
-    );
+    const parent = parentSearch.results?.[0];
+    const parentId = parent?.id;
+
+    // Try to find an existing page as a child of the parent first
+    let page;
+
+    if (parentId) {
+      const children = await api("FETCH CHILD PAGES", {
+        method: "get",
+        baseURL: `${BASE_URL}/wiki/rest/api`,
+        url: `/content/${parentId}/child/page`,
+        headers,
+        params: {
+          limit: 100,
+          expand: "version,body.storage",
+        },
+      });
+
+      page = children.results.find((p) => p.title.trim() === pageTitle.trim());
+    }
+
+    // Fallback: search across the space key if not found under parent
+    if (!page) {
+      const search = await api("FETCH PAGES", {
+        method: "get",
+        baseURL: `${BASE_URL}/wiki/rest/api`,
+        url: "/content",
+        headers,
+        params: {
+          spaceKey: SPACE_KEY,
+          limit: 100,
+          expand: "version,body.storage",
+        },
+      });
+
+      page = search.results.find((p) => p.title.trim() === pageTitle.trim());
+    }
 
     let pageId, version, body;
 
     if (!page) {
       console.log("🆕 CREATING PAGE");
 
+      const createData = {
+        type: "page",
+        title: pageTitle,
+        space: { key: SPACE_KEY },
+        body: {
+          storage: {
+            value: createTable(),
+            representation: "storage",
+          },
+        },
+      };
+
+      if (parentId) createData.ancestors = [{ id: parentId }];
+
       const created = await api("CREATE PAGE", {
         method: "post",
         baseURL: `${BASE_URL}/wiki/rest/api`,
         url: "/content",
         headers,
-        data: {
-          type: "page",
-          title: pageTitle,
-          space: { key: "REL" },
-          body: {
-            storage: {
-              value: createTable(),
-              representation: "storage",
-            },
-          },
-        },
+        data: createData,
       });
 
       pageId = created.id;
