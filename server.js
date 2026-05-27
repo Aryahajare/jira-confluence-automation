@@ -34,6 +34,26 @@ const confluence = axios.create({
   timeout: 15000,
 });
 
+// ─── HELPERS ─────────────────────────────────────
+function formatLaunchDate(input) {
+  const s = (input ?? "").toString().trim();
+  if (!s) return "";
+  // Expected incoming format: YYYY.MM.DD — convert to MM.DD.YYYY
+  const ymd = s.match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})$/);
+  if (ymd) {
+    const yyyy = ymd[1];
+    const mm = String(ymd[2]).padStart(2, "0");
+    const dd = String(ymd[3]).padStart(2, "0");
+    return `${mm}.${dd}.${yyyy}`;
+  }
+
+  // If already MM.DD.YYYY, pass through
+  if (/^\d{1,2}\.\d{1,2}\.\d{4}$/.test(s)) return s;
+
+  console.warn('formatLaunchDate: unexpected format, using raw value:', s);
+  return s;
+}
+
 const jira = axios.create({
   baseURL: `${BASE}/rest/api/3`,
   headers,
@@ -126,12 +146,13 @@ app.post("/jira-webhook", async (req, res) => {
     const data = req.body;
 
     // Use LaunchDate (new field) for page title; warn if missing
-    const launch = (data.LaunchDate ?? "").toString().trim();
-    if (!launch) {
+    const launchRaw = (data.LaunchDate ?? "").toString().trim();
+    if (!launchRaw) {
       console.warn('Webhook payload missing LaunchDate:', JSON.stringify(data));
       console.log('❌ PAGE CREATION CANCELED: missing LaunchDate');
       return res.status(400).send('Aborted: missing LaunchDate');
     }
+    const launch = formatLaunchDate(launchRaw);
     const pageTitle = `${launch} - CMS Release`;
 
     // SB extraction
