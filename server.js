@@ -261,6 +261,9 @@ app.post("/jira-webhook", async (req, res) => {
 
     const ciLinkHTML = `<a href="${data.jiraLink}">${data.jiraLink}</a>`;
 
+    const deploymentRaw = (data.stageDeploymentDate ?? "").toString().trim();
+    const deploymentText = deploymentRaw ? `Deployed to stage - ${formatLaunchDate(deploymentRaw)}` : "";
+
     const newRow = `
 <tr>
 <td>${sb}</td>
@@ -271,7 +274,7 @@ app.post("/jira-webhook", async (req, res) => {
 <td>${data.reporter}</td>
 <td>${data.assignee}</td>
 <td>${feedURL}</td>
-<td>${data.stageDeploymentDate}</td>
+<td>${deploymentText}</td>
   <td></td>
   <td></td>
 </tr>
