@@ -38,8 +38,8 @@ const confluence = axios.create({
 function formatLaunchDate(input) {
   const s = (input ?? "").toString().trim();
   if (!s) return "";
-  // Expected incoming format: YYYY.MM.DD — convert to MM.DD.YYYY
-  const ymd = s.match(/^(\d{4})\.(\d{1,2})\.(\d{1,2})$/);
+  // Expected incoming format: YYYY-MM-DD — convert to MM.DD.YYYY
+  const ymd = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})$/);
   if (ymd) {
     const yyyy = ymd[1];
     const mm = String(ymd[2]).padStart(2, "0");
