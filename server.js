@@ -153,7 +153,25 @@ app.post("/jira-webhook", async (req, res) => {
       return res.status(400).send('Aborted: missing LaunchDate');
     }
     const launch = formatLaunchDate(launchRaw);
-    const pageTitle = `${launch} - CMS Release`;
+
+    // Derive scope label from incoming labels (exclude STAGE/PROD)
+    let labelsArr = [];
+    if (Array.isArray(data.labels)) labelsArr = data.labels.map((l) => String(l).trim()).filter(Boolean);
+    else if (typeof data.stageOnly === 'string') labelsArr = data.stageOnly.split(',').map((s) => s.trim()).filter(Boolean);
+
+    console.log('Webhook labels array:', JSON.stringify(labelsArr));
+
+    const filtered = labelsArr.filter((l) => {
+      const low = l.toLowerCase();
+      return low !== 'stage' && low !== 'prod' && low !== 'production';
+    });
+
+    const scopeLabel = (filtered[0] || '').toString().trim();
+    if (scopeLabel) console.log('Using scope label for title:', scopeLabel);
+
+    const pageTitle = scopeLabel
+      ? `${launch} - ${scopeLabel.toUpperCase()} CMS Release`
+      : `${launch} - CMS Release`;
 
     // SB extraction
     const sbMatch = data.title.match(/\[(.*?)\]/);
