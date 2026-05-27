@@ -125,7 +125,14 @@ app.post("/jira-webhook", async (req, res) => {
   try {
     const data = req.body;
 
-    const pageTitle = `${data.fixVersion} - CMS Release`;
+    // Use LaunchDate (new field) for page title; warn if missing
+    const launch = (data.LaunchDate ?? "").toString().trim();
+    if (!launch) {
+      console.warn('Webhook payload missing LaunchDate:', JSON.stringify(data));
+      console.log('❌ PAGE CREATION CANCELED: missing LaunchDate');
+      return res.status(400).send('Aborted: missing LaunchDate');
+    }
+    const pageTitle = `${launch} - CMS Release`;
 
     // SB extraction
     const sbMatch = data.title.match(/\[(.*?)\]/);
