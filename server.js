@@ -14,7 +14,6 @@ const BASE_URL = process.env.BASE_URL;
 const BASE = (BASE_URL || "").replace(/\/+$/, "");
 
 const SPACE_KEY = process.env.SPACE_KEY || "IE";
-const PARENT_TITLE = process.env.PARENT_TITLE || "UF - CMS Release Scope";
 
 // ─── AUTH ────────────────────────────────────────
 const authHeader =
@@ -72,7 +71,11 @@ async function api(label, config) {
     console.log("✅ STATUS:", res.status, "| ⏱️", Date.now() - start, "ms");
     return res.data;
   } catch (err) {
-    console.error("❌ ERROR:", err.response?.status);
+    console.error("❌ ERROR:", err.response?.status, "| message:", err.message);
+    if (err.response && err.response.data) {
+      console.error("❌ ERROR RESPONSE BODY:", JSON.stringify(err.response.data));
+    }
+    console.error(err.stack);
     throw err;
   }
 }
@@ -170,7 +173,7 @@ app.post("/jira-webhook", async (req, res) => {
     if (scopeLabel) console.log('Using scope label for title:', scopeLabel);
 
     const pageTitle = scopeLabel
-      ? `${launch} - DirecTV ${scopeLabel.toUpperCase()} CMS Release`
+      ? `${launch} - DirecTV ${scopeLabel} CMS Release`
       : `${launch} - CMS Release`;
 
     // If no scope label provided, abort the process (don't lookup/create/update pages)
@@ -204,6 +207,8 @@ app.post("/jira-webhook", async (req, res) => {
 
     // ─── FETCH PAGE / FIND PARENT ─────────────────────────────
     // Find the parent page by title in the configured space key
+    const parentTitleDynamic = `${scopeLabel} - CMS Release Scope`;
+    console.log('Looking up parent page title:', parentTitleDynamic);
     const parentSearch = await api("FIND PARENT", {
       method: "get",
       baseURL: `${BASE}/wiki/rest/api`,
@@ -211,13 +216,18 @@ app.post("/jira-webhook", async (req, res) => {
       headers,
       params: {
         spaceKey: SPACE_KEY,
-        title: PARENT_TITLE,
+        title: parentTitleDynamic,
         expand: "version",
       },
     });
 
     const parent = parentSearch.results?.[0];
     const parentId = parent?.id;
+    if (!parent) {
+      console.warn('PARENT LOOKUP: no parent found for', parentTitleDynamic, '| parentSearch result count:', parentSearch.results?.length || 0);
+    } else {
+      console.log('PARENT LOOKUP: found parent id', parentId);
+    }
 
     // Try to find an existing page as a child of the parent first
     let page;
@@ -235,10 +245,13 @@ app.post("/jira-webhook", async (req, res) => {
       });
 
       page = children.results.find((p) => p.title.trim() === pageTitle.trim());
+      if (children.results?.length === 0) console.log('FETCH CHILD PAGES: parent has no children');
+      else console.log('FETCH CHILD PAGES: fetched', children.results.length, 'children');
     }
 
     // Fallback: search across the space key if not found under parent
     if (!page) {
+      console.log('PAGE NOT FOUND UNDER PARENT, performing space-wide search');
       const search = await api("FETCH PAGES", {
         method: "get",
         baseURL: `${BASE}/wiki/rest/api`,
@@ -252,12 +265,13 @@ app.post("/jira-webhook", async (req, res) => {
       });
 
       page = search.results.find((p) => p.title.trim() === pageTitle.trim());
+      console.log('FETCH PAGES: found', search.results.length, 'pages in space');
     }
 
     let pageId, version, body;
 
     if (!page) {
-      console.log("🆕 CREATING PAGE");
+      console.log("🆕 CREATING PAGE", { title: pageTitle, space: SPACE_KEY });
 
       const createData = {
         type: "page",
@@ -272,22 +286,28 @@ app.post("/jira-webhook", async (req, res) => {
       };
 
       if (parentId) createData.ancestors = [{ id: parentId }];
+      try {
+        const created = await api("CREATE PAGE", {
+          method: "post",
+          baseURL: `${BASE}/wiki/rest/api`,
+          url: "/content",
+          headers,
+          data: createData,
+        });
 
-      const created = await api("CREATE PAGE", {
-        method: "post",
-        baseURL: `${BASE}/wiki/rest/api`,
-        url: "/content",
-        headers,
-        data: createData,
-      });
-
-      pageId = created.id;
-      version = 1;
-      body = createTable();
+        pageId = created.id;
+        version = 1;
+        body = createTable();
+        console.log('CREATE PAGE: created page id', pageId);
+      } catch (err) {
+        console.error('CREATE PAGE FAILED for title', pageTitle, 'error:', err.message);
+        return res.status(500).send('Error creating page');
+      }
     } else {
       pageId = page.id;
       version = page.version.number;
       body = page.body.storage.value;
+      console.log('PAGE FOUND: using page id', pageId, 'version', version);
     }
 
     // ─── CHEERIO PARSE ──────────────────────────
@@ -334,30 +354,38 @@ app.post("/jira-webhook", async (req, res) => {
     const updatedBody = $.html();
 
     // ─── UPDATE PAGE ────────────────────────────
-    await api("UPDATE PAGE", {
-      method: "put",
-      baseURL: `${BASE}/wiki/rest/api`,
-      url: `/content/${pageId}`,
-      headers,
-      data: {
-        id: pageId,
-        type: "page",
-        title: pageTitle,
-        version: { number: version + 1 },
-        body: {
-          storage: {
-            value: updatedBody,
-            representation: "storage",
+    try {
+      await api("UPDATE PAGE", {
+        method: "put",
+        baseURL: `${BASE}/wiki/rest/api`,
+        url: `/content/${pageId}`,
+        headers,
+        data: {
+          id: pageId,
+          type: "page",
+          title: pageTitle,
+          version: { number: version + 1 },
+          body: {
+            storage: {
+              value: updatedBody,
+              representation: "storage",
+            },
           },
         },
-      },
-    });
+      });
+      console.log('UPDATE PAGE: updated page id', pageId, 'to version', version + 1);
+    } catch (err) {
+      console.error('UPDATE PAGE FAILED for pageId', pageId, 'error:', err.message);
+      return res.status(500).send('Error updating page');
+    }
 
     console.log("🎉 SUCCESS");
     res.send("Done");
 
   } catch (err) {
-    console.error("❌ WEBHOOK FAILED");
+    console.error("❌ WEBHOOK FAILED:", err.message);
+    if (err.response && err.response.data) console.error('ERROR RESPONSE:', JSON.stringify(err.response.data));
+    console.error(err.stack);
     res.status(500).send("Error");
   }
 });
