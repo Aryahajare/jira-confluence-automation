@@ -83,16 +83,16 @@ const createTable = () => `
 <tbody>
 <tr>
 <th>SB/Acquia</th>
-<th>Stage Only</th>
+<th>Scope of deployment(Stage/prod)</th>
 <th>CI Link</th>
 <th>PID</th>
-<th>Description</th>
-<th>DEV Contact</th>
-<th>CI Contact</th>
+<th>Brief Business Description of CMS change requested</th>
+<th>DEV Contact(Reporter)</th>
+<th>CI Contact(Assignee)</th>
 <th>Feed URL</th>
-<th>Deployment Date</th>
+<th>Deployment Date[use Deployment Date field](Ready for stage deployment, Deployed to stage, Validated in stage)</th>
 <th>CMS Release name</th>
-<th>Validation Status</th>
+<th>Stage & Prod Validation Status</th>
 </tr>
 </tbody>
 </table>
@@ -172,12 +172,21 @@ app.post("/jira-webhook", async (req, res) => {
     const pageTitle = scopeLabel
       ? `${launch} - ${scopeLabel.toUpperCase()} CMS Release`
       : `${launch} - CMS Release`;
+    
+    // Determine environment label to display in Stage column (only STAGE or PROD)
+    const envLabelRaw = labelsArr.find((l) => {
+      const low = l.toLowerCase();
+      return low === 'stage' || low === 'prod' || low === 'production';
+    }) || '';
+    const envDisplay = envLabelRaw
+      ? (envLabelRaw.toLowerCase().startsWith('prod') ? 'PROD' : 'STAGE')
+      : '';
 
     // SB extraction
     const sbMatch = data.title.match(/\[(.*?)\]/);
     const sb = sbMatch ? sbMatch[1] : "";
 
-    // PID extraction
+    // PID extraction 
     const pid = data.portfolioEpic
       ? data.portfolioEpic.split(":")[0].trim()
       : "";
@@ -285,7 +294,7 @@ app.post("/jira-webhook", async (req, res) => {
     const newRow = `
 <tr>
 <td>${sb}</td>
-<td>${data.stageOnly}</td>
+<td>${envDisplay}</td>
 <td>${ciLinkHTML}</td>
 <td>${pid}</td>
 <td>${data.title}</td>
