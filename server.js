@@ -170,7 +170,7 @@ app.post("/jira-webhook", async (req, res) => {
     if (scopeLabel) console.log('Using scope label for title:', scopeLabel);
 
     const pageTitle = scopeLabel
-      ? `${launch} - DirecTV${scopeLabel.toUpperCase()} CMS Release`
+      ? `${launch} - DirecTV ${scopeLabel.toUpperCase()} CMS Release`
       : `${launch} - CMS Release`;
 
     // If no scope label provided, abort the process (don't lookup/create/update pages)
