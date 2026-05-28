@@ -170,8 +170,15 @@ app.post("/jira-webhook", async (req, res) => {
     if (scopeLabel) console.log('Using scope label for title:', scopeLabel);
 
     const pageTitle = scopeLabel
-      ? `${launch} - ${scopeLabel.toUpperCase()} CMS Release`
+      ? `${launch} - DirecTV${scopeLabel.toUpperCase()} CMS Release`
       : `${launch} - CMS Release`;
+
+    // If no scope label provided, abort the process (don't lookup/create/update pages)
+    if (!scopeLabel) {
+      console.warn('Webhook payload missing scope label (non-STAGE/PROD label):', JSON.stringify(data));
+      console.log('❌ PAGE CREATION CANCELED: missing scope label');
+      return res.status(400).send('Aborted: missing scope label');
+    }
     
     // Determine environment label to display in Stage column (only STAGE or PROD)
     const envLabelRaw = labelsArr.find((l) => {
