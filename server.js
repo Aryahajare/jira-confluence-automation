@@ -26,6 +26,19 @@ const headers = {
   "User-Agent": "jira-confluence-bot/1.0",
 };
 
+function sanitizeHeaders(h = {}) {
+  const copy = { ...h };
+  if (copy.Authorization) {
+    try {
+      const v = String(copy.Authorization);
+      copy.Authorization = v.startsWith('Basic ') ? 'Basic *****' : '*****';
+    } catch (e) {
+      copy.Authorization = '*****';
+    }
+  }
+  return copy;
+}
+
 // ─── AXIOS CLIENTS ───────────────────────────────
 const confluence = axios.create({
   baseURL: `${BASE}/wiki/rest/api`,
@@ -65,6 +78,13 @@ async function api(label, config) {
 
   console.log(`\n════════ ${label} ════════`);
   console.log("➡️", config.method.toUpperCase(), config.baseURL + config.url);
+  try {
+    if (config.params) console.log('➡️ PARAMS:', JSON.stringify(config.params));
+    if (config.data) console.log('➡️ PAYLOAD KEYS:', Object.keys(config.data));
+    if (config.headers) console.log('➡️ REQ HEADERS:', sanitizeHeaders(config.headers));
+  } catch (e) {
+    console.warn('api: failed to log extra request details');
+  }
 
   try {
     const res = await axios(config);
@@ -162,12 +182,117 @@ async function getFeedUrls(issueKey) {
   }
 }
 
+// ─── DIAGNOSTICS ─────────────────────────────────
+async function runDiagnostics(issueKey, parentTitle) {
+  const out = { jiraIssue: null, remotelinks: null, confluenceParent: null };
+
+  try {
+    if (issueKey) {
+      try {
+        out.jiraIssue = await api('DIAG - GET ISSUE', {
+          method: 'get',
+          baseURL: `${BASE}/rest/api/3`,
+          url: `/issue/${issueKey}`,
+          headers,
+        });
+      } catch (e) {
+        out.jiraIssue = { error: e.message, body: e.response?.data };
+      }
+
+      try {
+        out.remotelinks = await api('DIAG - GET REMOTELINKS', {
+          method: 'get',
+          baseURL: `${BASE}/rest/api/3`,
+          url: `/issue/${issueKey}/remotelink`,
+          headers,
+        });
+      } catch (e) {
+        out.remotelinks = { error: e.message, body: e.response?.data };
+      }
+    } else {
+      out.jiraIssue = { warning: 'no issueKey provided' };
+      out.remotelinks = { warning: 'no issueKey provided' };
+    }
+
+    if (parentTitle) {
+      try {
+        out.confluenceParent = await api('DIAG - FIND PARENT', {
+          method: 'get',
+          baseURL: `${BASE}/wiki/rest/api`,
+          url: '/content',
+          headers,
+          params: { spaceKey: SPACE_KEY, title: parentTitle, expand: 'version' },
+        });
+      } catch (e) {
+        out.confluenceParent = { error: e.message, body: e.response?.data };
+      }
+    } else {
+      out.confluenceParent = { warning: 'no parentTitle provided' };
+    }
+
+  } catch (err) {
+    console.error('runDiagnostics unexpected error', err.message);
+    out._error = err.message;
+  }
+
+  // Log a concise diagnostic summary (avoid dumping tokens)
+  try {
+    console.log('DIAG SUMMARY:', JSON.stringify({
+      jiraIssue: out.jiraIssue && (out.jiraIssue.error ? 'ERROR' : 'OK'),
+      remotelinks: out.remotelinks && (out.remotelinks.error ? 'ERROR' : (Array.isArray(out.remotelinks) ? `count=${out.remotelinks.length}` : 'OK')),
+      confluenceParent: out.confluenceParent && (out.confluenceParent.error ? 'ERROR' : (out.confluenceParent.results ? `found=${out.confluenceParent.results.length}` : 'OK')),
+    }));
+  } catch (e) {
+    console.warn('Failed to log DIAG SUMMARY');
+  }
+
+  return out;
+}
+
+// Optional: expose diagnostics endpoint for ad-hoc checks in the running environment
+app.get('/diag', async (req, res) => {
+  const issueKey = req.query.issueKey || '';
+  const parentTitle = req.query.parentTitle || '';
+  try {
+    const d = await runDiagnostics(issueKey, parentTitle);
+    res.json({ ok: true, diag: d });
+  } catch (err) {
+    res.status(500).json({ ok: false, error: err.message });
+  }
+});
+
 // ─── WEBHOOK ─────────────────────────────────────
 app.post("/jira-webhook", async (req, res) => {
   console.log("\n🔥 WEBHOOK HIT");
 
   try {
     const data = req.body;
+
+    // Verbose per-variable diagnostics (mask secrets)
+    try {
+      console.log('WEBHOOK - ENV VARS:');
+      console.log(' - BASE:', BASE || '(missing)');
+      console.log(' - SPACE_KEY:', SPACE_KEY || '(missing)');
+      console.log(' - EMAIL:', EMAIL ? `${EMAIL}` : '(missing)');
+      console.log(' - API_TOKEN present:', API_TOKEN ? 'YES' : 'NO');
+    } catch (e) {
+      console.warn('Failed to log env vars');
+    }
+
+    try {
+      console.log('WEBHOOK - PAYLOAD FIELDS:');
+      console.log(' - ticketId:', data.ticketId || '(missing)');
+      console.log(' - LaunchDate:', data.LaunchDate || '(missing)');
+      console.log(' - labels:', JSON.stringify(data.labels || data.stageOnly || []));
+      console.log(' - jiraLink:', data.jiraLink || '(missing)');
+      console.log(' - title:', data.title || '(missing)');
+      console.log(' - portfolioEpic:', data.portfolioEpic || '(missing)');
+      console.log(' - reporter:', data.reporter || '(missing)');
+      console.log(' - assignee:', data.assignee || '(missing)');
+      console.log(' - stageDeploymentDate:', data.stageDeploymentDate || '(missing)');
+    } catch (e) {
+      console.warn('Failed to log payload fields');
+    }
 
     // Use LaunchDate (new field) for page title; warn if missing
     const launchRaw = (data.LaunchDate ?? "").toString().trim();
@@ -224,12 +349,26 @@ app.post("/jira-webhook", async (req, res) => {
 
     console.log('Webhook payload stageOnly:', JSON.stringify(data.stageOnly));
     if (!data.ticketId) console.warn('Webhook payload missing ticketId:', JSON.stringify(data));
+    // Precompute parent title so diagnostics can check Confluence parent as well
+    const parentTitleDynamic = `${scopeLabel} - CMS Release Scope`;
+    console.log('Looking up parent page title (pre-diagnostic):', parentTitleDynamic);
+
+    // Run diagnostics (Jira issue GET, remotelinks GET, Confluence parent search)
+    try {
+      const diag = await runDiagnostics(data.ticketId, parentTitleDynamic);
+      console.log('DIAGNOSTICS RESULT:', JSON.stringify({
+        jiraIssue: diag.jiraIssue && diag.jiraIssue.error ? `ERROR:${diag.jiraIssue.error}` : (diag.jiraIssue ? 'OK' : 'NONE'),
+        remotelinks: Array.isArray(diag.remotelinks) ? `count=${diag.remotelinks.length}` : (diag.remotelinks?.error || 'NONE'),
+        confluenceParent: diag.confluenceParent && diag.confluenceParent.error ? `ERROR:${diag.confluenceParent.error}` : (diag.confluenceParent && diag.confluenceParent.results ? `found=${diag.confluenceParent.results.length}` : 'NONE')
+      }));
+    } catch (e) {
+      console.warn('Diagnostics run failed:', e.message);
+    }
+
     const feedURL = await getFeedUrls(data.ticketId);
 
     // ─── FETCH PAGE / FIND PARENT ─────────────────────────────
     // Find the parent page by title in the configured space key
-    const parentTitleDynamic = `${scopeLabel} - CMS Release Scope`;
-    console.log('Looking up parent page title:', parentTitleDynamic);
     const parentSearch = await api("FIND PARENT", {
       method: "get",
       baseURL: `${BASE}/wiki/rest/api`,
