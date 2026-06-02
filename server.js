@@ -115,28 +115,49 @@ async function getFeedUrls(issueKey) {
       headers,
     });
 
-    const urls = res
-      .filter((l) => {
-        const isConfluence =
-          l.application?.type === "com.atlassian.confluence";
+    // `res` is typically an array of remotelink objects. Log a short sample for debugging.
+    try {
+      console.log('REMOTELINKS RAW:', Array.isArray(res) ? `count=${res.length}` : JSON.stringify(res).slice(0,1000));
+    } catch (e) {
+      console.warn('Could not stringify remotelinks sample');
+    }
 
-        const isFeed =
-          l.object?.title?.toLowerCase().includes("feed");
+    const links = Array.isArray(res) ? res : (res.values || []);
 
-        return !isConfluence && isFeed;
-      })
-      .map((l) => l.object?.url)
-      .filter(Boolean);
+    try {
+      console.log('REMOTELINKS FETCHED (count):', links.length);
+      console.log('REMOTELINKS RAW SAMPLE:', JSON.stringify(links, null, 2).slice(0, 20000));
+    } catch (e) {
+      console.warn('getFeedUrls: failed to stringify raw remotelinks');
+    }
 
-    if (!urls.length) return "N/A";
+    // Include all remotelinks except those with a title exactly 'Jira Align' (case-insensitive).
+    const matched = links.filter((l) => {
+      const title = String(l.object?.title || l.title || "").trim();
+      if (/^jira\s+align$/i.test(title)) return false;
+      return true;
+    });
 
-    // ✅ Each URL as clickable link + new line
-    return urls
-      .map((url) => `<a href="${url}">${url}</a>`)
-      .join("<br/>");
+    const urls = matched.map((l) => l.object?.url || l.url).filter(Boolean);
+
+    console.log('MATCHED REMOTELINKS (count):', matched.length);
+    try {
+      console.log('MATCHED REMOTELINKS DETAILS:', JSON.stringify(matched, null, 2).slice(0, 20000));
+    } catch (e) {
+      console.warn('getFeedUrls: failed to stringify matched remotelinks');
+    }
+    console.log('MATCHED REMOTELINK URLS:', urls);
+
+    if (!urls.length) {
+      console.log('getFeedUrls: no matching remotelinks found for', issueKey);
+      return "N/A";
+    }
+
+    return urls.map((url) => `<a href="${url}">${url}</a>`).join("<br/>");
 
   } catch (err) {
-    console.error("❌ FEED URL FETCH FAILED");
+    console.error("❌ FEED URL FETCH FAILED", err.message);
+    if (err.response && err.response.data) console.error('FEED ERROR RESPONSE:', JSON.stringify(err.response.data));
     return "N/A";
   }
 }
